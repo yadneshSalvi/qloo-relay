@@ -65,6 +65,17 @@ export function requireQlooConfiguration(env: Record<string, string | undefined>
 
 type Transport = (request: PreparedRank["request"], configuration: ReturnType<typeof requireQlooConfiguration>) => Promise<unknown>;
 
+/** The CLI emits structured failures with a nonzero exit code and no status.
+ * Normalize only that documented shape; diagnostics never become result prose.
+ */
+export function parseOfficialExecOutput(stdout: string): unknown {
+  const raw: unknown = JSON.parse(stdout);
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && "operation" in raw && raw.operation === "rank" && "error" in raw && !("status" in raw)) {
+    return { ...raw, schema_version: "1.0-preview.1", status: "error", results: [] };
+  }
+  return raw;
+}
+
 /** Supported official `qloo exec` surface, no shell, 15-second deadline, no retries/fallback. */
 export const runOfficialHarness: Transport = async (request, configuration) => {
   try {
@@ -73,17 +84,27 @@ export const runOfficialHarness: Transport = async (request, configuration) => {
       timeout: 15_000, killSignal: "SIGKILL", maxBuffer: 512_000, encoding: "utf8",
       env: { NODE_ENV: "production", PATH: process.env.PATH, QLOO_HOME: resolve(".data/qloo"), QLOO_API_KEY: configuration.apiKey, QLOO_BASE_URL: configuration.baseUrl, QLOO_TRUSTED_BASE_URL: configuration.baseUrl },
     });
-    return JSON.parse(stdout);
+    return parseOfficialExecOutput(stdout);
   } catch (error) {
     const timedOut = !!error && typeof error === "object" && "killed" in error && error.killed;
+    if (!timedOut && error && typeof error === "object" && "code" in error && [1, 2, 4, 130].includes(Number(error.code)) && "stdout" in error && typeof error.stdout === "string") {
+      try { return parseOfficialExecOutput(error.stdout); } catch { /* Reject incomplete or non-JSON diagnostics. */ }
+    }
     throw new DomainError(timedOut ? "QLOO_TIMEOUT" : "QLOO_UPSTREAM", timedOut ? "Qloo did not complete within the request deadline. No sample results were substituted." : "The official Qloo workflow did not complete. No sample results were substituted.", 503);
   }
 };
 
 const rankEnvelope = z.object({
-  schema_version: z.literal("1.0-preview.1"), operation: z.literal("rank"), status: z.enum(["ok", "empty"]),
-  results: z.array(z.object({ entity_id: entityId, type: z.string(), affinity: z.number().finite().optional() })).max(QLOO_MAX_CANDIDATES),
+  schema_version: z.literal("1.0-preview.1"), operation: z.literal("rank"), status: z.enum(["ok", "empty", "needs_input", "partial", "degraded", "error"]),
+  results: z.array(z.object({ entity_id: entityId, type: z.string(), affinity: z.number().finite().optional() })).max(QLOO_MAX_CANDIDATES).default([]),
+  result_count: z.number().int().nonnegative().optional(),
+  error: z.object({ code: z.string(), layer: z.string(), retryable: z.boolean(), recovery: z.string() }).optional(),
+}).superRefine((value, ctx) => {
+  if (value.status === "error" && !value.error) ctx.addIssue({ code: "custom", message: "A workflow failure needs an error contract." });
+  if (value.result_count !== undefined && value.result_count !== value.results.length) ctx.addIssue({ code: "custom", message: "The result count is inconsistent." });
+  if (["empty", "needs_input", "error"].includes(value.status) && value.results.length) ctx.addIssue({ code: "custom", message: "This workflow state cannot release ranked results." });
 });
+const safeFailureCodes = new Set(["CANCELLED", "HARNESS_INTERNAL", "QLOO_AUTH", "QLOO_CONNECT", "QLOO_CONTRACT", "QLOO_DNS", "QLOO_RATE_LIMIT", "QLOO_TIMEOUT", "QLOO_TLS", "QLOO_UPSTREAM", "RESOLVER_AUTH", "RESOLVER_CONNECT", "RESOLVER_CONTRACT", "RESOLVER_TIMEOUT", "RESOLVER_UPSTREAM", "TOOL_INPUT"]);
 
 /** Read-only integration boundary. Production discovery needs a durable job and mapping UI first. */
 export async function rankVerifiedInventory(prepared: PreparedRank, current: Scope, options: { env?: Record<string, string | undefined>; transport?: Transport } = {}) {
@@ -97,5 +118,8 @@ export async function rankVerifiedInventory(prepared: PreparedRank, current: Sco
     seen.add(row.entity_id);
     return { entityId: row.entity_id, position: index + 1, affinity: row.affinity ?? null, itemIds: prepared.copies.filter(copy => copy.entityId === row.entity_id).map(copy => copy.itemId) };
   });
-  return { source: "live-qloo" as const, transport: "official-harness-exec" as const, adapterVersion: QLOO_ADAPTER_VERSION, scopeHash: prepared.scopeHash, generatedAt: new Date().toISOString(), shortlist: prepared.shortlist, rankings };
+  const status = parsed.data.status;
+  const warning = status === "partial" ? "Some Qloo evidence is unavailable." : status === "degraded" ? "Qloo reported reduced evidence quality." : status === "needs_input" ? "Review the confirmed cultural references or candidate mappings." : status === "error" ? "Qloo could not complete this request. No sample result was substituted." : null;
+  const error = status === "error" && parsed.data.error ? { code: safeFailureCodes.has(parsed.data.error.code) ? parsed.data.error.code : "QLOO_UPSTREAM", retryable: parsed.data.error.retryable } : undefined;
+  return { source: "live-qloo" as const, transport: "official-harness-exec" as const, adapterVersion: QLOO_ADAPTER_VERSION, scopeHash: prepared.scopeHash, generatedAt: new Date().toISOString(), shortlist: prepared.shortlist, status, warning, ...(error ? { error } : {}), rankings };
 }

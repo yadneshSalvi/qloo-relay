@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CATALOG, SEED_ITEMS } from "../../src/domain/catalog";
 import type { Item, Work } from "../../src/domain/types";
-import { prepareRank, rankVerifiedInventory, requireQlooConfiguration } from "../../src/server/qloo";
+import { parseOfficialExecOutput, prepareRank, rankVerifiedInventory, requireQlooConfiguration } from "../../src/server/qloo";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const work = (n: number): Work => ({ ...CATALOG[0], id: `work-${n}`, mappingStatus: "verified", qlooEntityId: id(n) });
@@ -54,5 +54,25 @@ describe("official Qloo integration boundary", () => {
     const empty = await rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => result([]) });
     expect(empty.rankings).toEqual([]);
     await expect(rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => { throw new Error("upstream offline"); } })).rejects.toThrow("upstream offline");
+  });
+  it("preserves all six workflow statuses and suppresses private failure prose", async () => {
+    const source = scope();
+    for (const status of ["ok", "empty", "needs_input", "partial", "degraded", "error"]) {
+      const response = { ...result(["ok", "partial", "degraded"].includes(status) ? [id(1)] : []), status, error: { code: "QLOO_RATE_LIMIT", layer: "qloo", retryable: true, recovery: "PRIVATE_SEED_CONTEXT" } };
+      const ranked = await rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => response });
+      expect(ranked.status).toBe(status);
+      expect(JSON.stringify(ranked)).not.toContain("PRIVATE_SEED_CONTEXT");
+      expect(ranked.rankings.length).toBe(["ok", "partial", "degraded"].includes(status) ? 1 : 0);
+    }
+  });
+  it("normalizes the CLI structured failure shape and rejects inconsistent state", async () => {
+    const source = scope();
+    const raw = parseOfficialExecOutput(JSON.stringify({ operation: "rank", error: { code: "QLOO_AUTH", layer: "qloo", retryable: false, recovery: "Configure the event key" } }));
+    const ranked = await rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => raw });
+    expect(ranked.status).toBe("error");
+    expect(ranked.error).toEqual({ code: "QLOO_AUTH", retryable: false });
+    for (const response of [{ ...result([id(1)]), status: "empty" }, { ...result([]), status: "error" }, { ...result([id(1)]), result_count: 2 }]) {
+      await expect(rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => response })).rejects.toMatchObject({ code: "QLOO_RESPONSE_INVALID" });
+    }
   });
 });
