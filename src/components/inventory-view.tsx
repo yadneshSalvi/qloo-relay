@@ -1,0 +1,54 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { ArrowRight, BookOpen, Check, Leaf, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import type { Category, Item, ItemCondition, Workspace } from "@/domain/types";
+import { useRelay, WorkspaceBoundary } from "./relay-provider";
+import { CoverArt } from "./art";
+import { BusyLabel, CategoryIcon, EmptyState, Modal, SampleNote, categoryLabels, conditionLabels } from "./ui";
+
+export function InventoryView({ initiallyOpen = false }: { initiallyOpen?: boolean }) {
+  return <WorkspaceBoundary>{workspace => <InventoryContent workspace={workspace} initiallyOpen={initiallyOpen}/>}</WorkspaceBoundary>;
+}
+
+function InventoryContent({ workspace, initiallyOpen }: { workspace: Workspace; initiallyOpen: boolean }) {
+  const [addOpen, setAddOpen] = useState(initiallyOpen);
+  const [editing, setEditing] = useState<Item | null>(null);
+  const [withdrawing, setWithdrawing] = useState<Item | null>(null);
+  const [showWithdrawn, setShowWithdrawn] = useState(false);
+  const { command, busy } = useRelay();
+  const yourItems = workspace.items.filter(item => item.ownerId === workspace.currentMemberId && (showWithdrawn || item.state !== "withdrawn"));
+  const availableCount = yourItems.filter(i => i.state === "available").length;
+  return <div className="inventory-page page-enter"><header className="page-header"><div><span className="eyebrow">YOUR CORNER OF THE COLLECTION</span><h1>Make room for<br/><em className="soft-em">the next good thing.</em></h1><p>That book you finished. The record you know by heart.<br/>Give something you love a chance to be loved again.</p></div><button className="button primary" onClick={() => setAddOpen(true)}><Plus size={17}/>Offer an item</button></header>
+    <div className="shelf-context"><div><Leaf size={19}/><span><strong>{availableCount} {availableCount === 1 ? "thing" : "things"} ready for a new home.</strong> You decide what leaves your shelf.</span></div><button className="text-button" onClick={() => setShowWithdrawn(!showWithdrawn)}>{showWithdrawn ? "Hide withdrawn items" : "Show withdrawn items"}</button></div>
+    <div className="shelf-grid">{yourItems.map((item,index) => {
+      const work = workspace.works.find(w => w.id === item.workId)!;
+      return <article className="shelf-card" key={item.id}><div className={`shelf-card-art shelf-tone-${index%3}`}><CoverArt work={work}/><span className="category-badge"><CategoryIcon category={work.category} size={12}/>{categoryLabels[work.category]}</span><span className={`item-state item-state-${item.state}`}><span/>{item.state === "available" ? "Open to a trade" : item.state.replaceAll("_", " ")}</span></div><div className="shelf-card-content"><h2>{work.title}</h2><p className="shelf-author">{work.author}</p><div className="shelf-copy-line"><span className={`condition-dot condition-${item.condition}`}/>{conditionLabels[item.condition]}<span>·</span>{item.edition}</div><p className="shelf-notes">“{item.notes}”</p><div className="shelf-card-bottom"><span><ShieldCheck size={13}/>{item.attested ? "Ownership confirmed by you" : "Ownership needs confirmation"}</span>{item.state === "available" ? <div><button className="icon-button" aria-label={`Edit ${work.title}`} onClick={() => setEditing(item)}><Pencil size={15}/></button><button className="icon-button" aria-label={`Withdraw ${work.title}`} onClick={() => setWithdrawing(item)}><Trash2 size={15}/></button></div> : item.heldByProposalId ? <Link className="text-link" href={`/exchanges/${item.heldByProposalId}`}>View exchange<ArrowRight size={13}/></Link> : null}</div></div></article>;
+    })}<button className="add-shelf-card" onClick={() => setAddOpen(true)}><span><Plus size={28} strokeWidth={1.3}/></span><h3>What’s ready to move on?</h3><p>Add a book, record, or game.<br/>A new possibility starts here.</p><strong>Offer something good <ArrowRight size={14}/></strong></button></div>
+    {!yourItems.length ? <EmptyState icon={<BookOpen size={29}/>} title="Your shelf is ready for its first story." action={<button className="button primary" onClick={() => setAddOpen(true)}>Add your first item <Plus size={15}/></button>}><p>A specific copy, an honest condition note, and a little willingness to let it go. That’s all it takes.</p></EmptyState> : null}
+    <div className="shelf-guide"><span className="eyebrow">A FEW GOOD SHELF MANNERS</span><div><section><span>01</span><h3>Make it yours to give.</h3><p>Only offer copies you own. Every listing represents one actual object.</p></section><section><span>02</span><h3>Love the little details.</h3><p>Edition, format, and honest condition notes help everyone choose with confidence.</p></section><section><span>03</span><h3>Keep your final say.</h3><p>A listing is an invitation. Every trade still needs your exact approval and confirmation.</p></section></div></div><SampleNote compact/>
+    <ItemForm key={editing?.id ?? "new-item"} workspace={workspace} item={editing} open={addOpen || !!editing} onClose={() => { setAddOpen(false);setEditing(null); }}/>
+    <Modal open={!!withdrawing} onOpenChange={open => { if (!open) setWithdrawing(null); }} title="Take this one off the shelf?" description="The copy stays in your history. Any open approvals involving it will be invalidated."><div className="dialog-actions"><button className="button secondary" onClick={() => setWithdrawing(null)}>Keep it available</button><button className="button danger" disabled={!!busy} onClick={async () => { if (!withdrawing) return; const result = await command({ type:"withdrawItem", itemId:withdrawing.id, expectedVersion:withdrawing.version, reason:"I’m keeping this copy for now." }); if (result) setWithdrawing(null); }}><BusyLabel busy={!!busy}>Withdraw this copy</BusyLabel></button></div></Modal>
+  </div>;
+}
+
+function ItemForm({ workspace, item, open, onClose }: { workspace: Workspace; item: Item | null; open: boolean; onClose: () => void }) {
+  const { command, busy } = useRelay();
+  const [category, setCategory] = useState<Category>(workspace.works.find(w => w.id === item?.workId)?.category ?? "book");
+  const [workId, setWorkId] = useState(item?.workId ?? "work-earthsea");
+  const [edition, setEdition] = useState(item?.edition ?? "");
+  const [condition, setCondition] = useState<ItemCondition>(item?.condition ?? "good");
+  const [notes, setNotes] = useState(item?.notes ?? "");
+  const [attested, setAttested] = useState(item?.attested ?? false);
+  const chosenWork = workspace.works.find(w => w.id === workId)!;
+  const changeCategory = (value: Category) => { setCategory(value);setWorkId(workspace.works.find(w => w.category === value)!.id); };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const result = item ? await command({ type:"updateItem", itemId:item.id, expectedVersion:item.version, edition, condition, notes }) : await command({ type:"addItem", workId, edition, condition, notes, attested });
+    if (result) { onClose(); if (!item) { setEdition("");setNotes("");setAttested(false); } }
+  };
+  return <Modal open={open} onOpenChange={value => { if (!value) onClose(); }} title={item ? "The little details matter." : "A new possibility starts here."} description={item ? "Changing a copy’s details invalidates any older approvals for it." : "Choose a cultural work, then describe your specific copy."}><form onSubmit={submit} className="item-form">
+    {!item ? <><div className="category-choice">{(["book","record","game"] as Category[]).map(c => <button key={c} type="button" className={category === c ? "active" : ""} onClick={() => changeCategory(c)}><CategoryIcon category={c} size={17}/>{categoryLabels[c]}</button>)}</div><div className="form-field"><label htmlFor="work-identity" className="field-label">What is it?</label><select id="work-identity" value={workId} onChange={e => setWorkId(e.target.value)}>{workspace.works.filter(w => w.category === category).map(w => <option key={w.id} value={w.id}>{w.title} — {w.author}</option>)}</select><small>Choose from the sample catalog. Live identity search will become available after Qloo is connected.</small></div></> : null}
+    <div className="identity-preview"><CoverArt work={chosenWork} flat/><div><span className="eyebrow">CULTURAL WORK</span><strong>{chosenWork.title}</strong><span>{chosenWork.author} · {chosenWork.year}</span></div><Check size={17}/></div><div className="form-field"><label className="field-label" htmlFor="copy-edition">Your edition or format</label><input id="copy-edition" required maxLength={160} value={edition} onChange={e => setEdition(e.target.value)} placeholder={category === "game" ? "Nintendo Switch · physical cartridge" : category === "record" ? "Stereo LP · 2018 reissue" : "Paperback · English · 2020 edition"}/></div><div className="form-field"><label className="field-label" htmlFor="copy-condition">A truthful condition</label><select id="copy-condition" value={condition} onChange={e => setCondition(e.target.value as ItemCondition)}><option value="like-new">Like new — very little wear</option><option value="good">Good — light signs of a life well lived</option><option value="fair">Well loved — still complete and usable</option></select></div><div className="form-field"><label className="field-label" htmlFor="copy-notes">Anything the next person should know?</label><textarea id="copy-notes" required minLength={5} maxLength={500} value={notes} onChange={e => setNotes(e.target.value)} placeholder="A bent corner, a note in the margin, or simply ready for a new home…"/></div>{!item ? <label className="check-label"><input type="checkbox" required checked={attested} onChange={e => setAttested(e.target.checked)}/><span>I own this copy, the details are accurate, and I’m happy to bring it to the handoff hub if an exchange is confirmed.</span></label> : null}<div className="dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" type="submit" disabled={!!busy || !attested}><BusyLabel busy={!!busy}>{item ? "Save copy details" : "Offer this item"}<ArrowRight size={15}/></BusyLabel></button></div><p className="fine-print">This adds a copy only to your private sample workspace.</p></form></Modal>;
+}

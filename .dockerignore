@@ -1,0 +1,21 @@
+# Keep private strategy and local credentials out of build contexts.
+plans/
+.git/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+node_modules/
+.next/
+dist/
+out/
+coverage/
+test-results/
+playwright-report/
+.artifacts/
+.data/
+.vercel/
+*.log
+*.tsbuildinfo
+.DS_Store

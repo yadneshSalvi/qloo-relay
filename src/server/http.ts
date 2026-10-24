@@ -15,8 +15,15 @@ export function attachSession(response: NextResponse, request: NextRequest, toke
 
 export function assertSameOrigin(request: NextRequest) {
   const origin = request.headers.get("origin");
-  if (request.headers.get("sec-fetch-site") === "cross-site" || (origin && origin !== new URL(request.url).origin)) {
+  // Next can normalize a loopback request URL to localhost even when the browser
+  // used 127.0.0.1. Trust only that URL and the explicitly configured public origin.
+  const allowedOrigins = new Set([new URL(request.url).origin]);
+  if (process.env.APP_ORIGIN) allowedOrigins.add(new URL(process.env.APP_ORIGIN).origin);
+  if (!origin || request.headers.get("sec-fetch-site") === "cross-site" || !allowedOrigins.has(origin)) {
     throw new DomainError("CROSS_SITE_REQUEST", "Open RELAY directly to make a sample exchange action.", 403);
+  }
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    throw new DomainError("JSON_REQUIRED", "Exchange commands must use application/json.", 415);
   }
 }
 

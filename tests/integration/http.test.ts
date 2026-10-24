@@ -9,6 +9,7 @@ import { GET as eventsGet } from "../../src/app/api/events/route";
 import type { ApiResult } from "../../src/domain/types";
 import { closePool, getPool } from "../../src/server/db";
 import { SESSION_COOKIE } from "../../src/server/service";
+import { assertSameOrigin } from "../../src/server/http";
 import { ensureTestSchema } from "./db-fixture";
 
 if (!process.env.DATABASE_URL && existsSync(".env.local")) loadEnvFile(".env.local");
@@ -31,6 +32,19 @@ afterEach(async () => {
 afterAll(closePool);
 
 describe("HTTP API with a real durable database", () => {
+  it("accepts only the request or configured public origin, including normalized loopback URLs", () => {
+    const previous = process.env.APP_ORIGIN;
+    process.env.APP_ORIGIN = "http://127.0.0.1:3101";
+    try {
+      expect(() => assertSameOrigin(request({}, undefined, { origin: "http://127.0.0.1:3101", "sec-fetch-site": "same-origin" }))).not.toThrow();
+      expect(() => assertSameOrigin(request({}, undefined, { origin: "https://unrelated.example" }))).toThrow();
+      expect(() => assertSameOrigin(request({}, undefined, { origin: "http://127.0.0.1:3101", "sec-fetch-site": "cross-site" }))).toThrow();
+      const missing = request({});
+      missing.headers.delete("origin");
+      expect(() => assertSameOrigin(missing)).toThrow();
+      expect(() => assertSameOrigin(request({}, undefined, { "content-type": "text/plain" }))).toThrow();
+    } finally { if (previous === undefined) delete process.env.APP_ORIGIN; else process.env.APP_ORIGIN = previous; }
+  });
   it("creates an isolated HTTP-only sample cookie and forbids shared response caching", async () => {
     const { response, body } = await open();
     expect(response.status).toBe(200);

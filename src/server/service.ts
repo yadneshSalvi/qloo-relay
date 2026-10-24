@@ -3,14 +3,13 @@ import type { PoolClient } from "pg";
 import { CATALOG, MEMBERS, SEED_APPROVALS, SEED_ITEMS, TERMS } from "../domain/catalog";
 import { assertDomain, DomainError } from "../domain/errors";
 import { solveCycles } from "../domain/solver";
+import { APPROVAL_LIFETIME_MS, PROPOSAL_LIFETIME_MS } from "../domain/policy";
 import type { ApiResult, Command, Evidence, ExchangeTerms, Item, Proposal, Workspace } from "../domain/types";
 import { withTransaction } from "./db";
 import { loadWorkspace, type SessionRow } from "./workspace";
 
 export const SESSION_COOKIE = "relay_sample";
 export const SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7;
-const APPROVAL_LIFETIME_MS = 48 * 60 * 60 * 1000;
-const PROPOSAL_LIFETIME_MS = 2 * 60 * 60 * 1000;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const hashValue = (value: unknown) => hash(JSON.stringify(value));
 
