@@ -1,0 +1,30 @@
+# Local implementation and competition strategy; never publish.
+/plans/
+
+# Secrets and machine-local configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+
+# Dependencies and generated output.
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+.turbo/
+.cache/
+.artifacts/
+*.log
+*.tsbuildinfo
+
+# Local service/deployment state.
+.vercel/
+.data/
+
