@@ -2,7 +2,7 @@
 
 **Your next favorite is already on someone's shelf.**
 
-[Try the deployed app](https://relay-web-nm4t32wiiq-uc.a.run.app) · [Dated release verification](RELEASE-VERIFICATION.md)
+[Try the deployed app](https://relay-web-nm4t32wiiq-uc.a.run.app) · [Watch the 2:57 demo](https://relay-demo-641101150486.us-central1.run.app/) · [Dated release verification](RELEASE-VERIFICATION.md)
 
 ## What it does
 

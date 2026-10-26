@@ -23,6 +23,12 @@ The 17 additional hosted checks verified `Secure`, `HttpOnly`, `SameSite=Lax`, a
 
 The worker duration includes the dispatched task's processing; it is one observation, not a latency benchmark. A provider request and a model step are different accounting units. Broader local integration checks covered books, games and artist-level record affinity. No raw Qloo responses, reviewed identity mappings, private community identifiers, invitation codes or credentials are included here.
 
+## Published release artifacts
+
+The source release `11727dccb06ed0ee73534bd60821a7a4a35d2790` passed [clean GitHub CI](https://github.com/yadneshSalvi/qloo-relay/actions/runs/40394439374), including the production build, type/lint checks, all 81 domain/PostgreSQL tests, structural evaluation and all 13 browser tests. CI uses no provider credentials.
+
+The [public demo film](https://relay-demo-641101150486.us-central1.run.app/) is 177 seconds, 1920×1080 at 30 fps, with Gemini 3.1 TTS narration, Deepgram word-timed captions and actual application captures. It uses clearly labelled fictional sample rehearsals. The MP4 SHA-256 is `d46debf070bff0b155450c81d0855a7b8013db74f2fc0f415197bc051a149950`. Final decoded frames and encoded audio checks passed; audio was measured and transcript-checked, not independently listened to. The separate static viewing service exposes only the selected film, poster and WebVTT captions; private source and raw captures are excluded.
+
 ## Reproduce
 
 Follow the [README setup and verification instructions](../README.md#verify) with a dedicated PostgreSQL test database. Run `pnpm test`, `pnpm test:e2e`, and `pnpm exec tsx scripts/evaluate.ts`. The structural evaluator needs no database or provider credentials; [evaluation notes](EVALUATION.md) explain its independent oracle and limitations.

@@ -2,7 +2,7 @@
 
 **Discover new wants. Make exchanges happen.**
 
-[Open the deployed RELAY app](https://relay-web-nm4t32wiiq-uc.a.run.app) · [Release verification](docs/RELEASE-VERIFICATION.md) · [Submission overview](docs/SUBMISSION.md)
+[Open the deployed RELAY app](https://relay-web-nm4t32wiiq-uc.a.run.app) · [Watch the 2:57 demo](https://relay-demo-641101150486.us-central1.run.app/) · [Release verification](docs/RELEASE-VERIFICATION.md) · [Submission overview](docs/SUBMISSION.md)
 
 RELAY helps a small community exchange books, records, and physical games. Qloo discovers cultural connections inside offered inventory. A bounded OpenAI agent checks useful categories and possible exchange paths. People approve exact copies; a deterministic solver connects two to five members; each participant confirms separately; a coordinator inspects the complete set before recording its release.
 
