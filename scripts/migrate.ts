@@ -14,7 +14,7 @@ async function main() {
     for (const work of CATALOG) {
       await client.query("INSERT INTO relay.catalog_works(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data", [work.id, work]);
     }
-    console.log(`RELAY schema v4 ready; ${CATALOG.length} authored catalog works. Session inventory is created only when a sample session starts.`);
+    console.log(`RELAY schema v7 ready; ${CATALOG.length} starter catalog works. Verified mappings are preserved separately; confirmed additions are scoped. Private communities start empty.`);
   });
 }
 

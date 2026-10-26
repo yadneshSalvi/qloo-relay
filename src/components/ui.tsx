@@ -1,5 +1,6 @@
 "use client";
 import { Dialog } from "radix-ui";
+import { useRelay } from "./relay-provider";
 import { X, ArrowUpRight, Check, Disc3, BookOpen, Gamepad2, LoaderCircle } from "lucide-react";
 import type { Category, ItemCondition, Member, ProposalStatus } from "@/domain/types";
 
@@ -32,6 +33,9 @@ export function EmptyState({ icon, eyebrow, title, children, action }: { icon?: 
   return <div className="empty-state">{icon ? <div className="empty-icon">{icon}</div> : null}{eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}<h2>{title}</h2><div className="empty-description">{children}</div>{action}</div>;
 }
 export function SampleNote({ compact = false }: { compact?: boolean }) {
+  const { workspace } = useRelay();
+  if (workspace?.session.mode === "private") return <div className={`sample-note ${compact ? "compact" : ""}`}><span className="sample-dot"/><span>{compact ? "Private community · Individual guest sessions · Participant-recorded actions" : "Your invited community shares listings and exchange decisions. Display names, ownership, and handoffs are participant or coordinator attestations. Every exact trade remains your own choice."}</span></div>;
+  if (workspace?.discovery?.source === "live-qloo") return <div className={`sample-note ${compact ? "compact" : ""}`}><span className="sample-dot"/><span>Fictional sample community · Live Qloo discovery evidence is labeled separately · Your choices remain explicit</span></div>;
   return <div className={`sample-note ${compact ? "compact" : ""}`}><span className="sample-dot" /><span>{compact ? "Sample community · Your own private workspace" : "You’re in a sample community. People, copies, and taste connections are authored for this experience. Your choices are saved only in this workspace."}</span></div>;
 }
 export function niceDate(value: string, options: Intl.DateTimeFormatOptions = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) {

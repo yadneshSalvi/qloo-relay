@@ -13,6 +13,8 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("reset"), displayName }),
   z.strictObject({ type: z.literal("preferences"), seedWorkIds: z.array(id).min(1).max(5).refine((ids) => new Set(ids).size === ids.length, "Choose each reference once."), novelty: z.number().int().min(0).max(100) }),
   z.strictObject({ type: z.literal("discover"), category: category.optional(), mode: z.enum(["sample", "live"]).optional() }),
+  z.strictObject({ type: z.literal("cancelRun"), runId: z.uuid() }),
+  z.strictObject({ type: z.literal("retryRun"), runId: z.uuid() }),
   z.strictObject({ type: z.literal("saveItem"), itemId: id }),
   z.strictObject({ type: z.literal("dismiss"), itemId: id, reason }),
   z.strictObject({ type: z.literal("addItem"), workId: id, edition: z.string().trim().min(2).max(160), condition, notes: z.string().trim().max(500), attested: z.boolean() }),

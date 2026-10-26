@@ -1,25 +1,27 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { CATALOG, MEMBERS, SEED_APPROVALS, SEED_ITEMS, TERMS } from "../domain/catalog";
-import { assertDomain, DomainError } from "../domain/errors";
+import { MEMBERS, SEED_APPROVALS, SEED_ITEMS, TERMS } from "../domain/catalog";
+import { assertDomain } from "../domain/errors";
 import { solveCycles } from "../domain/solver";
 import { APPROVAL_LIFETIME_MS, PROPOSAL_LIFETIME_MS } from "../domain/policy";
 import type { ApiResult, Command, Evidence, ExchangeTerms, Item, Proposal, Workspace } from "../domain/types";
 import { withTransaction } from "./db";
 import { loadWorkspace, type SessionRow } from "./workspace";
+import { enqueueDiscovery, controlRun } from "./jobs";
 
 export const SESSION_COOKIE = "relay_sample";
+export const ACCESS_COOKIE = "relay_private";
 export const SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const hashValue = (value: unknown) => hash(JSON.stringify(value));
 
-async function evidence(client: PoolClient, sessionId: string, kind: Evidence["kind"], title: string, summary: string, details: Record<string, unknown>) {
+async function evidence(client: PoolClient, sessionId: string, kind: Evidence["kind"], title: string, summary: string, details: Record<string, unknown>, memberId: string | null = null) {
   const id = randomUUID();
-  await client.query("INSERT INTO relay.evidence(session_id,id,kind,source,title,summary,details) VALUES($1,$2,$3,'authored-sample',$4,$5,$6)", [sessionId, id, kind, title, summary, details]);
+  await client.query("INSERT INTO relay.evidence(session_id,id,kind,source,title,summary,details,member_id) SELECT $1,$2,$3,CASE WHEN mode='sample' THEN 'authored-sample' ELSE 'participant-recorded' END,$4,$5,$6,$7 FROM relay.sessions WHERE id=$1", [sessionId, id, kind, title, summary, details, memberId]);
   return id;
 }
 
-async function event(client: PoolClient, sessionId: string, type: string, aggregateId: string, summary: string, payload: Record<string, unknown> = {}) {
+export async function event(client: PoolClient, sessionId: string, type: string, aggregateId: string, summary: string, payload: Record<string, unknown> = {}) {
   const id = randomUUID();
   const sequence = (await client.query<{ next_sequence: string }>("UPDATE relay.sessions SET next_sequence=next_sequence+1 WHERE id=$1 RETURNING next_sequence", [sessionId])).rows[0].next_sequence;
   await client.query("INSERT INTO relay.domain_events(session_id,id,sequence,type,aggregate_id,summary,payload) VALUES($1,$2,$3,$4,$5,$6,$7)", [sessionId, id, sequence, type, aggregateId, summary, payload]);
@@ -58,6 +60,7 @@ export async function createSession(displayName = "You", transaction?: { client:
 export async function replaceSession(token: string, command: Extract<Command, { type: "startSession" | "reset" }>, key: string) {
   return withTransaction(async (client) => {
     const previous = await lockSession(client, token);
+    assertDomain(previous.mode === "sample", "PRIVATE_COMMUNITY_ACTIVE", "Leave the private community in this browser before starting a fresh sample.", 403);
     const commandHash = hashValue(command);
     const replay = (await client.query<{ command_hash: string; replacement_session_id: string | null }>("SELECT command_hash,replacement_session_id FROM relay.idempotency_keys WHERE session_id=$1 AND key=$2", [previous.id, key])).rows[0];
     const deriveToken = () => createHmac("sha256", token).update(`relay-session-replacement-v1:${key}:${commandHash}`).digest("base64url");
@@ -76,16 +79,31 @@ export async function replaceSession(token: string, command: Extract<Command, { 
   });
 }
 
-async function lockSession(client: PoolClient, token: string): Promise<SessionRow> {
-  assertDomain(/^[A-Za-z0-9_-]{43}$/.test(token), "SESSION_EXPIRED", "This sample session has ended. Start a fresh exchange.", 401);
-  // The session row is the serialization lock for every mutable record in its community.
-  // No command can read consent while another command changes it concurrently.
-  const session = (await client.query<SessionRow>("SELECT * FROM relay.sessions WHERE token_hash=$1 FOR UPDATE", [hash(token)])).rows[0];
-  assertDomain(session && session.expires_at > new Date(), "SESSION_EXPIRED", "This sample session has ended. Start a fresh exchange.", 401);
-  return session;
+export interface SessionAccess extends SessionRow {
+  memberId: string;
+  role: "member" | "coordinator";
+  credentialId: string | null;
+  credentialExpiresAt: Date;
 }
 
-async function cancelProposal(client: PoolClient, sessionId: string, proposal: Proposal, status: "withdrawn" | "invalidated" | "expired", reason: string, memberId: string | null = null) {
+/** A supplied member ID never selects the actor. Every private actor comes from a hashed bearer credential. */
+export async function resolveSessionAccess(client: PoolClient, token: string): Promise<SessionAccess> {
+  assertDomain(/^[A-Za-z0-9_-]{43}$/.test(token), "SESSION_EXPIRED", "This browser session has ended. Open community access to continue.", 401);
+  const privateAccess = (await client.query<SessionRow & { member_id: string; role: SessionAccess["role"]; active: boolean; credential_id: string; credential_expires_at: Date; revoked_at: Date | null }>(
+    "SELECT s.*,a.member_id,m.role,m.active,a.id AS credential_id,a.expires_at AS credential_expires_at,a.revoked_at FROM relay.access_sessions a JOIN relay.sessions s ON s.id=a.session_id JOIN relay.members m ON m.session_id=a.session_id AND m.id=a.member_id WHERE a.token_hash=$1 FOR UPDATE OF s", [hash(token)],
+  )).rows[0];
+  if (privateAccess) {
+    assertDomain(privateAccess.mode === "private" && privateAccess.active && !privateAccess.revoked_at && privateAccess.credential_expires_at > new Date() && privateAccess.expires_at > new Date(), "ACCESS_REVOKED", "This community session expired or its access was revoked. Ask the coordinator for a new invitation.", 401);
+    return { ...privateAccess, memberId: privateAccess.member_id, role: privateAccess.role, credentialId: privateAccess.credential_id, credentialExpiresAt: privateAccess.credential_expires_at };
+  }
+  const session = (await client.query<SessionRow>("SELECT * FROM relay.sessions WHERE token_hash=$1 AND mode='sample' FOR UPDATE", [hash(token)])).rows[0];
+  assertDomain(session && session.expires_at > new Date(), "SESSION_EXPIRED", "This browser session has ended. Open community access to continue.", 401);
+  return { ...session, memberId: "you", role: "member", credentialId: null, credentialExpiresAt: session.expires_at };
+}
+
+const lockSession = resolveSessionAccess;
+
+export async function cancelProposal(client: PoolClient, sessionId: string, proposal: Proposal, status: "withdrawn" | "invalidated" | "expired", reason: string, memberId: string | null = null) {
   const inCustody = proposal.receipts.length > 0;
   const nextStatus = inCustody ? "disputed" : status;
   await client.query("UPDATE relay.proposals SET status=$3,withdrawn_by=$4,withdrawal_reason=$5,dispute_kind=$6 WHERE session_id=$1 AND id=$2", [sessionId, proposal.id, nextStatus, memberId, reason, inCustody ? "custody" : null]);
@@ -97,11 +115,11 @@ async function cancelProposal(client: PoolClient, sessionId: string, proposal: P
   await event(client, sessionId, `proposal.${nextStatus}`, proposal.id, inCustody ? "A change after hub receipt froze this exchange for coordinator review." : reason, { memberId, reason, previousStatus: proposal.status });
 }
 
-async function expireState(client: PoolClient, sessionId: string) {
+async function expireState(client: PoolClient, sessionId: string, memberId = "you") {
   await client.query("UPDATE relay.approvals SET status='expired' WHERE session_id=$1 AND status='active' AND expires_at <= now()", [sessionId]);
   const expired = (await client.query<{ id: string }>("SELECT id FROM relay.proposals WHERE session_id=$1 AND status IN ('proposed','reserved','handoff_ready') AND expires_at<=now() ORDER BY id", [sessionId])).rows;
   if (expired.length) {
-    const workspace = await loadWorkspace(client, sessionId);
+    const workspace = await loadWorkspace(client, sessionId, memberId);
     for (const row of expired) {
       const proposal = workspace.proposals.find((entry) => entry.id === row.id)!;
       await cancelProposal(client, sessionId, proposal, "expired", "The confirmation or reservation window expired. Fresh confirmation is required.");
@@ -112,30 +130,30 @@ async function expireState(client: PoolClient, sessionId: string) {
 export async function getWorkspace(token: string): Promise<Workspace> {
   return withTransaction(async (client) => {
     const session = await lockSession(client, token);
-    await expireState(client, session.id);
-    return loadWorkspace(client, session.id);
+    await expireState(client, session.id, session.memberId);
+    return loadWorkspace(client, session.id, session.memberId, session.credentialExpiresAt);
   });
 }
 
 export async function getEvents(token: string, after: number) {
   return withTransaction(async (client) => {
     const session = await lockSession(client, token);
-    await expireState(client, session.id);
+    await expireState(client, session.id, session.memberId);
     const rows = (await client.query<{ id: string; sequence: string; type: string; aggregate_id: string; summary: string; created_at: Date }>("SELECT id,sequence,type,aggregate_id,summary,created_at FROM relay.domain_events WHERE session_id=$1 AND sequence>$2 ORDER BY sequence LIMIT 101", [session.id, after])).rows;
     const events = rows.slice(0, 100).map((row) => ({ id: row.id, sequence: Number(row.sequence), type: row.type, aggregateId: row.aggregate_id, summary: row.summary, createdAt: row.created_at.toISOString() }));
-    return { events, nextSequence: events.at(-1)?.sequence ?? after, hasMore: rows.length > 100, dataOrigin: "authored-sample" };
+    return { events, nextSequence: events.at(-1)?.sequence ?? after, hasMore: rows.length > 100, dataOrigin: session.mode === "sample" ? "authored-sample" : "participant-recorded" };
   });
 }
 
 function itemById(workspace: Workspace, id: string): Item {
   const item = workspace.items.find((entry) => entry.id === id);
-  assertDomain(item, "ITEM_NOT_FOUND", "That copy does not belong to this sample community.", 404);
+  assertDomain(item, "ITEM_NOT_FOUND", "That copy does not belong to this community.", 404);
   return item;
 }
 
 function proposalById(workspace: Workspace, id: string): Proposal {
   const proposal = workspace.proposals.find((entry) => entry.id === id);
-  assertDomain(proposal, "PROPOSAL_NOT_FOUND", "That exchange does not belong to this sample community.", 404);
+  assertDomain(proposal, "PROPOSAL_NOT_FOUND", "That exchange does not belong to this community.", 404);
   return proposal;
 }
 
@@ -171,7 +189,7 @@ async function invalidateItemProposals(client: PoolClient, workspace: Workspace,
 
 async function generateProposals(client: PoolClient, workspace: Workspace, repairOf: Proposal | null = null) {
   const busyMembers = workspace.proposals.filter((proposal) => ["reserved", "handoff_ready", "disputed"].includes(proposal.status)).flatMap((proposal) => proposal.legs.map((leg) => leg.memberId));
-  const excludedMemberIds = [...busyMembers, ...(repairOf?.withdrawnBy ? [repairOf.withdrawnBy] : [])];
+  const excludedMemberIds = [...busyMembers, ...workspace.members.filter((member) => member.active === false || member.role !== "member").map((member) => member.id), ...(repairOf?.withdrawnBy ? [repairOf.withdrawnBy] : [])];
   const result = solveCycles({ items: workspace.items, approvals: workspace.approvals, termsHash: workspace.terms.hash, now: new Date(), excludedMemberIds });
   const selectedKeys = new Set(result.selected.map((cycle) => hash(cycle.key)));
   for (const old of workspace.proposals.filter((proposal) => proposal.status === "proposed")) {
@@ -199,61 +217,81 @@ async function generateProposals(client: PoolClient, workspace: Workspace, repai
 export async function executeCommand(token: string, command: Exclude<Command, { type: "startSession" | "reset" }>, idempotencyKey: string): Promise<ApiResult> {
   return withTransaction(async (client) => {
     const session = await lockSession(client, token);
+    const scopedKey = session.mode === "private" ? `${session.memberId}:${idempotencyKey}` : idempotencyKey;
     const commandHash = hashValue(command);
-    const replay = (await client.query<{ command_hash: string; notice: string | null }>("SELECT command_hash,notice FROM relay.idempotency_keys WHERE session_id=$1 AND key=$2", [session.id, idempotencyKey])).rows[0];
+    const replay = (await client.query<{ command_hash: string; notice: string | null }>("SELECT command_hash,notice FROM relay.idempotency_keys WHERE session_id=$1 AND key=$2", [session.id, scopedKey])).rows[0];
     if (replay) {
       assertDomain(replay.command_hash === commandHash, "IDEMPOTENCY_CONFLICT", "This request key was already used for another action. Refresh and retry with a new key.");
-      await expireState(client, session.id);
-      return { workspace: await loadWorkspace(client, session.id), ...(replay.notice ? { notice: replay.notice } : {}) };
+      await expireState(client, session.id, session.memberId);
+      return { workspace: await loadWorkspace(client, session.id, session.memberId, session.credentialExpiresAt), ...(replay.notice ? { notice: replay.notice } : {}) };
     }
-    await expireState(client, session.id);
-    const workspace = await loadWorkspace(client, session.id);
+    await expireState(client, session.id, session.memberId);
+    const workspace = await loadWorkspace(client, session.id, session.memberId, session.credentialExpiresAt);
+    authorizeCommand(workspace, command);
     const notice = await applyCommand(client, workspace, command);
-    await client.query("INSERT INTO relay.idempotency_keys(session_id,key,command_hash,notice) VALUES($1,$2,$3,$4)", [session.id, idempotencyKey, commandHash, notice ?? null]);
-    return { workspace: await loadWorkspace(client, session.id), ...(notice ? { notice } : {}) };
+    await client.query("INSERT INTO relay.idempotency_keys(session_id,key,command_hash,notice) VALUES($1,$2,$3,$4)", [session.id, scopedKey, commandHash, notice ?? null]);
+    return { workspace: await loadWorkspace(client, session.id, session.memberId, session.credentialExpiresAt), ...(notice ? { notice } : {}) };
   });
+}
+
+function authorizeCommand(workspace: Workspace, command: Exclude<Command, { type: "startSession" | "reset" }>) {
+  if (workspace.session.mode === "sample") return;
+  if (command.type === "receive" || command.type === "complete") {
+    assertDomain(workspace.access.role === "coordinator", "COORDINATOR_REQUIRED", "Only an authenticated community coordinator may inspect copies or record release.", 403);
+    return;
+  }
+  if (command.type === "createProposals" || command.type === "retryRepair") return;
+  assertDomain(workspace.access.role === "member", "PARTICIPANT_REQUIRED", "Use an invited participant session for personal listings, taste, approvals, and confirmations. Coordinator access only operates the event.", 403);
+  if (command.type === "confirm" || command.type === "withdraw") assertDomain(command.memberId === workspace.currentMemberId, "FORBIDDEN", "You can only confirm or withdraw your own part in this community.", 403);
 }
 
 async function applyCommand(client: PoolClient, workspace: Workspace, command: Exclude<Command, { type: "startSession" | "reset" }>): Promise<string | undefined> {
   const sessionId = workspace.session.id;
+  const memberId = workspace.currentMemberId;
   switch (command.type) {
     case "preferences": {
-      assertDomain(command.seedWorkIds.every((id) => CATALOG.some((work) => work.id === id)), "UNKNOWN_REFERENCE", "Choose references from the displayed catalog.", 400);
+      assertDomain(command.seedWorkIds.every((id) => workspace.works.some((work) => work.id === id)), "UNKNOWN_REFERENCE", "Choose and confirm references from your visible catalog.", 400);
       const version = workspace.preferences.version + 1;
-      await client.query("INSERT INTO relay.preference_versions(session_id,version,seed_work_ids,novelty) VALUES($1,$2,$3,$4)", [sessionId, version, JSON.stringify(command.seedWorkIds), command.novelty]);
-      const evidenceId = await evidence(client, sessionId, "preferences", "Voluntary reference selection", "Only the references you selected shape this sample discovery. Existing exact trade approvals stay explicit.", { version, seedWorkIds: command.seedWorkIds, novelty: command.novelty });
+      await client.query("INSERT INTO relay.preference_versions(session_id,member_id,version,seed_work_ids,novelty) VALUES($1,$2,$3,$4,$5)", [sessionId, memberId, version, JSON.stringify(command.seedWorkIds), command.novelty]);
+      const evidenceId = await evidence(client, sessionId, "preferences", "Voluntary reference selection", "Only references selected by this member shape their discovery. Existing exact trade approvals stay explicit.", { memberId, version, seedWorkIds: command.seedWorkIds, novelty: command.novelty }, memberId);
       await event(client, sessionId, "preferences.updated", sessionId, "Saved a new preference version.", { version, evidenceId });
       return "Taste references saved. Refresh discovery to explore a new shelf.";
     }
     case "discover": return discover(client, workspace, command);
+    case "cancelRun":
+    case "retryRun": return controlRun(client, workspace, command);
     case "saveItem": {
       const item = itemById(workspace, command.itemId);
-      assertDomain(item.ownerId !== "you", "OWN_ITEM", "Your own copy already belongs on your shelf.", 400);
-      await client.query("INSERT INTO relay.saved_items(session_id,item_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [sessionId, item.id]);
-      await client.query("DELETE FROM relay.dismissals WHERE session_id=$1 AND item_id=$2", [sessionId, item.id]);
+      assertDomain(item.ownerId !== memberId, "OWN_ITEM", "Your own copy already belongs on your shelf.", 400);
+      await client.query("INSERT INTO relay.saved_items(session_id,member_id,item_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [sessionId, memberId, item.id]);
+      await client.query("DELETE FROM relay.dismissals WHERE session_id=$1 AND member_id=$2 AND item_id=$3", [sessionId, memberId, item.id]);
       await event(client, sessionId, "item.saved", item.id, "Saved a copy for later. Saving is not approval to trade.");
       return "Saved to your collection. No trade has been approved.";
     }
     case "dismiss": {
       const item = itemById(workspace, command.itemId);
-      assertDomain(item.ownerId !== "you", "OWN_ITEM", "Choose another member's copy.", 400);
-      await client.query("INSERT INTO relay.dismissals(session_id,item_id,reason) VALUES($1,$2,$3) ON CONFLICT(session_id,item_id) DO UPDATE SET reason=EXCLUDED.reason,created_at=now()", [sessionId, item.id, command.reason]);
+      assertDomain(item.ownerId !== memberId, "OWN_ITEM", "Choose another member's copy.", 400);
+      await client.query("INSERT INTO relay.dismissals(session_id,member_id,item_id,reason) VALUES($1,$2,$3,$4) ON CONFLICT(session_id,member_id,item_id) DO UPDATE SET reason=EXCLUDED.reason,created_at=now()", [sessionId, memberId, item.id, command.reason]);
       await event(client, sessionId, "discovery.dismissed", item.id, "Dismissed a discovery without changing any trade approval.", { reason: command.reason });
       return "Preference noted. Refresh discovery for other copies.";
     }
     case "addItem": {
-      assertDomain(CATALOG.some((work) => work.id === command.workId), "WORK_NOT_FOUND", "Choose a work from the catalog before listing a copy.", 404);
+      const work = workspace.works.find((work) => work.id === command.workId);
+      assertDomain(work, "WORK_NOT_FOUND", "Choose and confirm a visible catalog work before listing a copy.", 404);
+      assertDomain(!work.referenceOnly, "RECORD_TITLE_REQUIRED", "This favorite identifies an artist, not an album. Find the artist for inventory and supply your physical record’s album title before listing it.", 422);
       assertDomain(command.attested, "OWNERSHIP_ATTESTATION_REQUIRED", "Confirm that you own this copy and can bring it to the handoff.", 400);
-      assertDomain(workspace.items.filter((item) => item.ownerId === "you").length < 20, "INVENTORY_LIMIT", "This sample shelf supports up to twenty of your copies.", 422);
+      assertDomain(workspace.items.filter((item) => item.ownerId === memberId).length < 20, "INVENTORY_LIMIT", "Your shelf supports up to twenty copies.", 422);
+      // Listing is the explicit boundary that publishes a member-private resolved work to this community.
+      await client.query("UPDATE relay.catalog_works SET visibility='shared' WHERE id=$1 AND session_id=$2 AND created_by_member_id=$3", [command.workId, sessionId, memberId]);
       const id = `item-${randomUUID()}`;
-      await client.query("INSERT INTO relay.items(session_id,id,work_id,owner_id,edition,condition,notes,attested,state) VALUES($1,$2,$3,'you',$4,$5,$6,true,'available')", [sessionId, id, command.workId, command.edition, command.condition, command.notes]);
-      const evidenceId = await evidence(client, sessionId, "inventory", "An explicitly offered sample copy", "A catalog work and an owned physical copy are separate records. Ownership is attested; condition still requires hub inspection.", { itemId: id, workId: command.workId, edition: command.edition, condition: command.condition });
-      await event(client, sessionId, "item.listed", id, "Added a copy to your sample shelf.", { evidenceId });
-      return "Your copy is available on the sample shelf.";
+      await client.query("INSERT INTO relay.items(session_id,id,work_id,owner_id,edition,condition,notes,attested,state) VALUES($1,$2,$3,$4,$5,$6,$7,true,'available')", [sessionId, id, command.workId, memberId, command.edition, command.condition, command.notes]);
+      const evidenceId = await evidence(client, sessionId, "inventory", "An explicitly offered copy", "A catalog work and an owned physical copy are separate records. Ownership is attested by the listing member; condition still requires hub inspection.", { itemId: id, memberId, workId: command.workId, edition: command.edition, condition: command.condition });
+      await event(client, sessionId, "item.listed", id, "Added an attested copy to the community shelf.", { evidenceId, memberId });
+      return "Your copy is available on the community shelf.";
     }
     case "updateItem": {
       const item = itemById(workspace, command.itemId);
-      assertDomain(item.ownerId === "you", "FORBIDDEN", "Only your own copy can be edited.", 403);
+      assertDomain(item.ownerId === memberId, "FORBIDDEN", "Only your own copy can be edited.", 403);
       checkItemVersion(item, command.expectedVersion);
       assertDomain(item.state === "available", "ITEM_HELD", "This copy is held or no longer available. Withdraw the exchange before changing its details.");
       await client.query("UPDATE relay.items SET edition=$3,condition=$4,notes=$5,version=version+1 WHERE session_id=$1 AND id=$2", [sessionId, item.id, command.edition ?? item.edition, command.condition ?? item.condition, command.notes ?? item.notes]);
@@ -264,7 +302,7 @@ async function applyCommand(client: PoolClient, workspace: Workspace, command: E
     }
     case "withdrawItem": {
       const item = itemById(workspace, command.itemId);
-      assertDomain(item.ownerId === "you", "FORBIDDEN", "Only your own copy can be withdrawn.", 403);
+      assertDomain(item.ownerId === memberId, "FORBIDDEN", "Only your own copy can be withdrawn.", 403);
       checkItemVersion(item, command.expectedVersion);
       assertDomain(!["at_hub", "disputed", "exchanged"].includes(item.state), "ITEM_IN_CUSTODY", "A copy at the hub or already exchanged cannot be silently relisted or withdrawn.");
       await invalidateItemProposals(client, workspace, item.id, command.reason ?? "The owner withdrew this offered copy.");
@@ -277,11 +315,11 @@ async function applyCommand(client: PoolClient, workspace: Workspace, command: E
     case "revokeApproval": {
       const approval = workspace.approvals.find((entry) => entry.id === command.approvalId);
       assertDomain(approval, "APPROVAL_NOT_FOUND", "That approval is not in this community.", 404);
-      assertDomain(approval.memberId === "you", "FORBIDDEN", "Only your own exact approval can be revoked here. Use the member withdrawal action to role-play a sample member.", 403);
-      assertDomain(approval.status !== "consumed", "ALREADY_COMPLETED", "The completed sample handoff cannot be undone by revoking a past approval.");
+      assertDomain(approval.memberId === memberId, "FORBIDDEN", "Only your own exact approval can be revoked.", 403);
+      assertDomain(approval.status !== "consumed", "ALREADY_COMPLETED", "A completed handoff cannot be undone by revoking a past approval.");
       await client.query("UPDATE relay.approvals SET status='revoked' WHERE session_id=$1 AND id=$2", [sessionId, approval.id]);
       for (const proposal of workspace.proposals.filter((entry) => ["proposed", "reserved", "handoff_ready"].includes(entry.status) && entry.legs.some((leg) => leg.approvalId === approval.id))) {
-        await cancelProposal(client, sessionId, proposal, "withdrawn", command.reason, "you");
+        await cancelProposal(client, sessionId, proposal, "withdrawn", command.reason, memberId);
       }
       await event(client, sessionId, "approval.revoked", approval.id, "Revoked your exact conditional approval.", { reason: command.reason });
       return "Approval withdrawn. Any affected exchange must be planned again.";
@@ -301,6 +339,7 @@ async function applyCommand(client: PoolClient, workspace: Workspace, command: E
     case "complete": return complete(client, workspace, command.proposalId);
     case "retryRepair": {
       const proposal = proposalById(workspace, command.proposalId);
+      assertDomain(workspace.session.mode === "sample" || workspace.access.role === "coordinator" || proposal.legs.some((leg) => leg.memberId === memberId), "FORBIDDEN", "Only an affected participant or the coordinator may request repair.", 403);
       assertDomain(["withdrawn", "invalidated", "expired"].includes(proposal.status), "REPAIR_NOT_ALLOWED", "Repair is available after a withdrawal, invalidation, or expired hold. Items in coordinator custody must be resolved first.");
       return generateProposals(client, workspace, proposal);
     }
@@ -308,12 +347,10 @@ async function applyCommand(client: PoolClient, workspace: Workspace, command: E
 }
 
 async function discover(client: PoolClient, workspace: Workspace, command: Extract<Command, { type: "discover" }>) {
-  if (command.mode === "live") {
-    if (!process.env.QLOO_API_KEY) throw new DomainError("MISSING_QLOO_KEY", "Live Qloo discovery is not configured. Add a server-side QLOO_API_KEY to use the separate live integration. Your sample workspace is preserved.", 503);
-    throw new DomainError("VERIFIED_MAPPING_REQUIRED", "The sample catalog has no verified Qloo entity mappings. Live ranking cannot use authored identities. Verify mappings before requesting a live result.", 422);
-  }
+  if (command.mode === "live") return enqueueDiscovery(client, workspace, command);
+  assertDomain(workspace.session.mode === "sample", "SAMPLE_ONLY", "Authored discovery belongs to the isolated sample. Choose live discovery for this private community.", 403);
   const dismissed = new Set(workspace.dismissals.map((entry) => entry.itemId));
-  const candidates = workspace.items.filter((item) => item.ownerId !== "you" && item.state === "available" && item.attested && !dismissed.has(item.id) && (!command.category || workspace.works.find((work) => work.id === item.workId)?.category === command.category));
+  const candidates = workspace.items.filter((item) => item.ownerId !== workspace.currentMemberId && item.state === "available" && item.attested && !dismissed.has(item.id) && (!command.category || workspace.works.find((work) => work.id === item.workId)?.category === command.category));
   const seeds = workspace.works.filter((work) => workspace.preferences.seedWorkIds.includes(work.id));
   const seedTags = new Set(seeds.flatMap((work) => work.tags));
   const seedCategories = new Set(seeds.map((work) => work.category));
@@ -347,7 +384,7 @@ async function discover(client: PoolClient, workspace: Workspace, command: Extra
     })),
     createdAt: new Date().toISOString(), disclosure: "Authored sample discovery · no live Qloo call · fictional available inventory",
   };
-  await client.query("INSERT INTO relay.discovery_runs(session_id,id,data) VALUES($1,$2,$3)", [workspace.session.id, id, run]);
+  await client.query("INSERT INTO relay.discovery_runs(session_id,id,member_id,data) VALUES($1,$2,$3,$4)", [workspace.session.id, id, workspace.currentMemberId, run]);
   await event(client, workspace.session.id, "discovery.completed", id, `Prepared ${run.suggestions.length} authored sample discoveries from ${candidateItemIds.length} eligible copies.`, { evidenceId, candidateSetHash, source: "authored-sample" });
   return run.suggestions.length ? "Your sample discoveries are ready. Choose an exact give/get pair when a copy interests you." : "No available copies match these filters. Try another category; existing approvals are preserved.";
 }
@@ -355,7 +392,7 @@ async function discover(client: PoolClient, workspace: Workspace, command: Extra
 async function approve(client: PoolClient, workspace: Workspace, command: Extract<Command, { type: "approve" }>) {
   const give = itemById(workspace, command.giveItemId);
   const receive = itemById(workspace, command.receiveItemId);
-  assertDomain(give.ownerId === "you" && receive.ownerId !== "you", "INVALID_OWNERSHIP", "Approve giving your own copy for another member's exact copy.", 403);
+  assertDomain(give.ownerId === workspace.currentMemberId && receive.ownerId !== workspace.currentMemberId, "INVALID_OWNERSHIP", "Approve giving your own copy for another member's exact copy.", 403);
   checkItemVersion(give, command.expectedGiveVersion);
   checkItemVersion(receive, command.expectedReceiveVersion);
   assertDomain(give.state === "available" && receive.state === "available", "ITEM_UNAVAILABLE", "One of these copies is already held or unavailable. Choose an available copy.");
@@ -363,8 +400,8 @@ async function approve(client: PoolClient, workspace: Workspace, command: Extrac
   const existing = workspace.approvals.find((approval) => approval.status === "active" && approval.giveItemId === give.id && approval.receiveItemId === receive.id && approval.giveVersion === give.version && approval.receiveVersion === receive.version && approval.termsHash === workspace.terms.hash);
   if (existing) return "This exact conditional trade is already approved. It still needs a complete proposal and every member's confirmation.";
   const id = randomUUID();
-  const evidenceId = await evidence(client, workspace.session.id, "approval", "Your exact conditional approval", "A session action approved this specific give/get pair, current copy versions, and displayed hub terms. A saved item or discovery ranking cannot create this record.", { approvalId: id, memberId: "you", giveItemId: give.id, receiveItemId: receive.id, giveVersion: give.version, receiveVersion: receive.version, termsVersion: workspace.terms.version, termsHash: workspace.terms.hash, authoredMemberAction: false });
-  await client.query("INSERT INTO relay.approvals(session_id,id,member_id,give_item_id,receive_item_id,give_version,receive_version,terms_version,terms_hash,preference_rank,status,authored,evidence_id,expires_at) VALUES($1,$2,'you',$3,$4,$5,$6,$7,$8,$9,'active',false,$10,$11)", [workspace.session.id, id, give.id, receive.id, give.version, receive.version, workspace.terms.version, workspace.terms.hash, command.preferenceRank ?? 1, evidenceId, new Date(Date.now() + APPROVAL_LIFETIME_MS)]);
+  const evidenceId = await evidence(client, workspace.session.id, "approval", "An exact conditional approval", "An authenticated session approved this specific give/get pair, current copy versions, and displayed hub terms. A saved item or discovery ranking cannot create this record.", { approvalId: id, memberId: workspace.currentMemberId, giveItemId: give.id, receiveItemId: receive.id, giveVersion: give.version, receiveVersion: receive.version, termsVersion: workspace.terms.version, termsHash: workspace.terms.hash, authoredMemberAction: false });
+  await client.query("INSERT INTO relay.approvals(session_id,id,member_id,give_item_id,receive_item_id,give_version,receive_version,terms_version,terms_hash,preference_rank,status,authored,evidence_id,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',false,$11,$12)", [workspace.session.id, id, workspace.currentMemberId, give.id, receive.id, give.version, receive.version, workspace.terms.version, workspace.terms.hash, command.preferenceRank ?? 1, evidenceId, new Date(Date.now() + APPROVAL_LIFETIME_MS)]);
   await event(client, workspace.session.id, "approval.created", id, "Approved an exact conditional give/get pair. No items are reserved yet.", { evidenceId, giveItemId: give.id, receiveItemId: receive.id });
   return "Exact trade approved. Find an exchange to see whether everyone's approved wants can connect.";
 }
@@ -374,7 +411,7 @@ async function confirm(client: PoolClient, workspace: Workspace, command: Extrac
   assertDomain(proposal.version === command.expectedVersion, "STALE_PROPOSAL_VERSION", "This proposal changed after you reviewed it. Review and confirm the current version.");
   const leg = proposal.legs.find((entry) => entry.memberId === command.memberId);
   assertDomain(leg, "FORBIDDEN", "Only a member of this exchange can confirm its terms.", 403);
-  if (["reserved", "handoff_ready"].includes(proposal.status) && leg.confirmed) return "This member already confirmed. The exchange is reserved for the sample handoff.";
+  if (["reserved", "handoff_ready"].includes(proposal.status) && leg.confirmed) return "This member already confirmed. The exchange is reserved for handoff.";
   assertDomain(proposal.status === "proposed", proposal.status === "invalidated" ? "RESERVATION_CONFLICT" : "PROPOSAL_NOT_ACTIVE", proposal.status === "invalidated" ? "This proposal was invalidated by changed consent, copies, or a competing reservation. Request a fresh allocation." : "This exchange is no longer collecting confirmations.");
   validateProposal(workspace, proposal);
   const active = (await client.query<{ id: string }>("SELECT id FROM relay.members WHERE session_id=$1 AND active AND role='member' AND id=ANY($2::text[])", [workspace.session.id, proposal.legs.map((entry) => entry.memberId)])).rows;
@@ -383,8 +420,9 @@ async function confirm(client: PoolClient, workspace: Workspace, command: Extrac
   assertDomain(!conflict.rows.length, "RESERVATION_CONFLICT", "A member already has an active exchange, even if another copy is available.");
   if (!leg.confirmed) {
     await client.query("INSERT INTO relay.confirmations(session_id,proposal_id,version,member_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", [workspace.session.id, proposal.id, proposal.version, command.memberId]);
-    const evidenceId = await evidence(client, workspace.session.id, "confirmation", command.memberId === "you" ? "Your complete-exchange confirmation" : "Explicit sample member role-play", "This confirmation binds the exact displayed proposal version. Other members are fictional and this action is explicit role-play by the session owner.", { proposalId: proposal.id, proposalVersion: proposal.version, memberId: command.memberId, rolePlayed: command.memberId !== "you", termsHash: proposal.terms.hash });
-    await event(client, workspace.session.id, "proposal.confirmed", proposal.id, `${workspace.members.find((entry) => entry.id === command.memberId)?.name ?? command.memberId} confirmed the exact sample exchange.`, { memberId: command.memberId, version: proposal.version, evidenceId });
+    const rolePlayed = workspace.session.mode === "sample" && command.memberId !== workspace.currentMemberId;
+    const evidenceId = await evidence(client, workspace.session.id, "confirmation", rolePlayed ? "Explicit sample member role-play" : "A participant’s complete-exchange confirmation", workspace.session.mode === "sample" ? "This confirmation binds the exact displayed proposal version. Other sample members are fictional; their actions are explicit role-play by the session owner." : "The session authenticated for this member confirmed the exact displayed proposal version. Display names are self-reported; the record proves this scoped session action, not an independently verified identity.", { proposalId: proposal.id, proposalVersion: proposal.version, memberId: command.memberId, rolePlayed, authentication: workspace.access.authentication, termsHash: proposal.terms.hash });
+    await event(client, workspace.session.id, "proposal.confirmed", proposal.id, `${workspace.members.find((entry) => entry.id === command.memberId)?.name ?? command.memberId} confirmed the exact exchange.`, { memberId: command.memberId, version: proposal.version, evidenceId });
   }
   const confirmed = (await client.query<{ count: string }>("SELECT count(*) FROM relay.confirmations WHERE session_id=$1 AND proposal_id=$2 AND version=$3", [workspace.session.id, proposal.id, proposal.version])).rows[0];
   if (Number(confirmed.count) < proposal.legs.length) return `Confirmation recorded. ${proposal.legs.length - Number(confirmed.count)} member${proposal.legs.length - Number(confirmed.count) === 1 ? " still needs" : "s still need"} to confirm.`;
@@ -408,8 +446,9 @@ async function receive(client: PoolClient, workspace: Workspace, command: Extrac
   const conditionDispute = proposal.status === "disputed" && proposal.disputeKind === "condition";
   assertDomain(["reserved", "handoff_ready"].includes(proposal.status) || conditionDispute, "HANDOFF_NOT_READY", "All members must confirm and reserve this exchange before the coordinator receives copies. Withdrawal or expired custody requires coordinator review.");
   assertDomain(proposal.legs.some((leg) => leg.giveItemId === command.itemId), "ITEM_NOT_IN_EXCHANGE", "That copy is not part of this exchange.", 400);
-  const coordinator = await client.query("SELECT 1 FROM relay.members WHERE session_id=$1 AND id='jo' AND role='coordinator' AND active", [workspace.session.id]);
-  assertDomain(coordinator.rows.length, "COORDINATOR_UNAVAILABLE", "The sample coordinator is unavailable.");
+  const inspectorId = workspace.session.mode === "sample" ? "jo" : workspace.currentMemberId;
+  const coordinator = await client.query("SELECT 1 FROM relay.members WHERE session_id=$1 AND id=$2 AND role='coordinator' AND active", [workspace.session.id, inspectorId]);
+  assertDomain(coordinator.rows.length, "COORDINATOR_UNAVAILABLE", "An active authenticated coordinator is required.");
   const existing = proposal.receipts.find((receipt) => receipt.itemId === command.itemId);
   if (existing) {
     if (existing.conditionAccepted === command.conditionAccepted) return "This copy is already recorded at the hub.";
@@ -417,9 +456,9 @@ async function receive(client: PoolClient, workspace: Workspace, command: Extrac
     assertDomain(proposal.expiresAt > new Date().toISOString(), "PROPOSAL_EXPIRED", "The reserved exchange window expired. Coordinator custody must be resolved before a new exchange.");
     const rejectedItem = itemById(workspace, command.itemId);
     assertDomain(rejectedItem.heldByProposalId === proposal.id && rejectedItem.state === "disputed", "RESERVATION_CONFLICT", "This rejected copy no longer belongs to the complete reserved exchange.");
-    await client.query("UPDATE relay.handoff_receipts SET condition_accepted=true,received_at=now() WHERE session_id=$1 AND proposal_id=$2 AND item_id=$3 AND NOT condition_accepted", [workspace.session.id, proposal.id, command.itemId]);
+    await client.query("UPDATE relay.handoff_receipts SET condition_accepted=true,received_at=now(),inspector_id=$4 WHERE session_id=$1 AND proposal_id=$2 AND item_id=$3 AND NOT condition_accepted", [workspace.session.id, proposal.id, command.itemId, inspectorId]);
   } else {
-    await client.query("INSERT INTO relay.handoff_receipts(session_id,proposal_id,item_id,inspector_id,condition_accepted) VALUES($1,$2,$3,'jo',$4)", [workspace.session.id, proposal.id, command.itemId, command.conditionAccepted]);
+    await client.query("INSERT INTO relay.handoff_receipts(session_id,proposal_id,item_id,inspector_id,condition_accepted) VALUES($1,$2,$3,$4,$5)", [workspace.session.id, proposal.id, command.itemId, inspectorId, command.conditionAccepted]);
   }
   await client.query("UPDATE relay.items SET state=$3 WHERE session_id=$1 AND id=$2", [workspace.session.id, command.itemId, command.conditionAccepted ? "at_hub" : "disputed"]);
   const inspections = (await client.query<{ accepted: string; rejected: string }>("SELECT count(*) FILTER(WHERE condition_accepted) AS accepted,count(*) FILTER(WHERE NOT condition_accepted) AS rejected FROM relay.handoff_receipts WHERE session_id=$1 AND proposal_id=$2", [workspace.session.id, proposal.id])).rows[0];
@@ -428,14 +467,14 @@ async function receive(client: PoolClient, workspace: Workspace, command: Extrac
   } else {
     await client.query("UPDATE relay.proposals SET status=$3,withdrawal_reason=NULL,dispute_kind=NULL WHERE session_id=$1 AND id=$2", [workspace.session.id, proposal.id, Number(inspections.accepted) === proposal.legs.length ? "handoff_ready" : "reserved"]);
   }
-  const evidenceId = await evidence(client, workspace.session.id, "receipt", existing ? "Explicit coordinator reinspection" : command.conditionAccepted ? "Coordinator receipt and inspection" : "Condition discrepancy freezes handoff", "The session owner explicitly role-played Jo's receipt inspection. A recorded receipt is distinct from releasing the complete exchange. Previous failed inspection evidence remains in the audit trail.", { proposalId: proposal.id, itemId: command.itemId, inspectorId: "jo", conditionAccepted: command.conditionAccepted, previousConditionAccepted: existing?.conditionAccepted ?? null, reinspection: !!existing, rolePlayed: true });
-  await event(client, workspace.session.id, existing ? "handoff.reinspected" : command.conditionAccepted ? "handoff.received" : "handoff.disputed", proposal.id, existing ? "The coordinator explicitly reinspected a rejected sample copy; the previous discrepancy remains in evidence." : command.conditionAccepted ? "The coordinator inspected and received one sample copy." : "A failed condition inspection froze redistribution for the whole exchange.", { itemId: command.itemId, evidenceId });
+  const evidenceId = await evidence(client, workspace.session.id, "receipt", existing ? "Explicit coordinator reinspection" : command.conditionAccepted ? "Coordinator receipt and inspection" : "Condition discrepancy freezes handoff", workspace.session.mode === "sample" ? "The session owner explicitly role-played Jo's receipt inspection. A recorded receipt is distinct from releasing the complete exchange. Previous failed inspection evidence remains in the audit trail." : "The coordinator’s authenticated session recorded inspection and receipt of this exact copy. It is a coordinator-attested record; prior failed inspections remain in the audit trail. Receipt alone does not release any copy.", { proposalId: proposal.id, itemId: command.itemId, inspectorId, conditionAccepted: command.conditionAccepted, previousConditionAccepted: existing?.conditionAccepted ?? null, reinspection: !!existing, rolePlayed: workspace.session.mode === "sample" });
+  await event(client, workspace.session.id, existing ? "handoff.reinspected" : command.conditionAccepted ? "handoff.received" : "handoff.disputed", proposal.id, existing ? "The coordinator explicitly reinspected a rejected copy; the previous discrepancy remains in evidence." : command.conditionAccepted ? "The coordinator recorded inspection and receipt of one copy." : "A failed condition inspection froze redistribution for the whole exchange.", { itemId: command.itemId, evidenceId, inspectorId });
   return Number(inspections.rejected) ? "Condition discrepancy recorded. The whole exchange is frozen; no copies can be released." : Number(inspections.accepted) === proposal.legs.length ? "Every copy passed inspection. The coordinator can now release the complete set together." : "Receipt recorded. Keep all copies at the desk until the complete set is inspected.";
 }
 
 async function complete(client: PoolClient, workspace: Workspace, proposalId: string) {
   const proposal = proposalById(workspace, proposalId);
-  if (proposal.status === "completed") return "This sample exchange is already complete.";
+  if (proposal.status === "completed") return "This exchange is already complete.";
   assertDomain(proposal.status === "handoff_ready", "HANDOFF_INCOMPLETE", "The coordinator must inspect and receive every copy before releasing the exchange.");
   validateProposal(workspace, proposal);
   assertDomain(proposal.legs.every((leg) => leg.confirmed && proposal.receipts.some((receipt) => receipt.itemId === leg.giveItemId && receipt.conditionAccepted && !receipt.releasedAt)), "HANDOFF_INCOMPLETE", "Every exact copy needs an accepted, unreleased coordinator receipt.");
@@ -447,7 +486,8 @@ async function complete(client: PoolClient, workspace: Workspace, proposalId: st
   await client.query("UPDATE relay.member_reservations SET state='completed' WHERE session_id=$1 AND proposal_id=$2 AND state='active'", [workspace.session.id, proposal.id]);
   await client.query("UPDATE relay.approvals SET status=CASE WHEN id=ANY($3::uuid[]) THEN 'consumed' ELSE 'revoked' END WHERE session_id=$1 AND status='active' AND (give_item_id=ANY($2::text[]) OR receive_item_id=ANY($2::text[]))", [workspace.session.id, proposal.legs.map((leg) => leg.giveItemId), proposal.legs.map((leg) => leg.approvalId)]);
   await client.query("UPDATE relay.proposals SET status='completed',completed_at=now() WHERE session_id=$1 AND id=$2", [workspace.session.id, proposal.id]);
-  const evidenceId = await evidence(client, workspace.session.id, "release", "A completed sample handoff", "All exact copies were received, accepted, and then released together by the role-played coordinator. This is a fictional session outcome, not evidence of a real pilot or Qloo effectiveness.", { proposalId: proposal.id, memberCount: proposal.legs.length, itemIds: proposal.legs.map((leg) => leg.giveItemId), rolePlayed: true, dataOrigin: "authored-sample", realWorldOutcome: false });
-  await event(client, workspace.session.id, "handoff.completed", proposal.id, `Released the complete sample exchange for ${proposal.legs.length} members.`, { evidenceId, dataOrigin: "authored-sample" });
-  return "Sample exchange complete. Every copy was inspected before the whole set was released.";
+  const sample = workspace.session.mode === "sample";
+  const evidenceId = await evidence(client, workspace.session.id, "release", sample ? "A completed sample handoff" : "Coordinator-attested complete handoff", sample ? "All exact copies were received, accepted, and then released together by the role-played coordinator. This is a fictional session outcome, not evidence of a real pilot or Qloo effectiveness." : "The coordinator’s scoped session recorded release of the complete inspected set to the assigned recipients. This is a coordinator-attested outcome, not an independently observed exchange or a measured Qloo effect.", { proposalId: proposal.id, memberCount: proposal.legs.length, itemIds: proposal.legs.map((leg) => leg.giveItemId), coordinatorId: sample ? "jo" : workspace.currentMemberId, rolePlayed: sample, dataOrigin: workspace.session.dataOrigin, independentlyObserved: false });
+  await event(client, workspace.session.id, "handoff.completed", proposal.id, `Recorded release of the complete exchange for ${proposal.legs.length} members.`, { evidenceId, dataOrigin: workspace.session.dataOrigin });
+  return sample ? "Sample exchange complete. Every copy was inspected before the whole set was released." : "Complete handoff recorded by the coordinator. Every copy passed inspection before release.";
 }

@@ -1,3 +1,7 @@
+import { ACCESS_SCHEMA } from "./schema-access";
+import { RUNTIME_SCHEMA } from "./schema-runtime";
+import { CATALOG_SCHEMA } from "./schema-catalog";
+
 /** One reversible, application-owned schema. No production data is touched outside relay. */
 export const SCHEMA_UP = `
 CREATE SCHEMA IF NOT EXISTS relay;
@@ -167,6 +171,6 @@ ALTER TABLE relay.proposals ADD COLUMN IF NOT EXISTS dispute_kind text CHECK(dis
 INSERT INTO relay.schema_migrations(version) VALUES(3) ON CONFLICT DO NOTHING;
 ALTER TABLE relay.idempotency_keys ADD COLUMN IF NOT EXISTS replacement_session_id uuid;
 INSERT INTO relay.schema_migrations(version) VALUES(4) ON CONFLICT DO NOTHING;
-`;
+` + ACCESS_SCHEMA + RUNTIME_SCHEMA + CATALOG_SCHEMA;
 
 export const SCHEMA_DOWN = "DROP SCHEMA IF EXISTS relay CASCADE";

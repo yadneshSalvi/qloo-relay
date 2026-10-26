@@ -127,6 +127,15 @@ test("inventory details and preference choices persist; live mode fails without 
   const before = await workspace(page);
   expect(before.preferences.seedWorkIds).toContain("work-hades");
   expect(before.preferences.novelty).toBe(100);
+  // Exercise dependency failure without spending provider credit on a live-enabled test server.
+  await page.route("**/api/command", async (route) => {
+    const action = route.request().postDataJSON();
+    if (action.type === "discover" && action.mode === "live") {
+      await route.fulfill({ status: 503, json: { error: { code: "MISSING_QLOO_KEY", message: "Injected missing Qloo key: live discovery is unavailable; existing sample results are preserved." } } });
+      return;
+    }
+    await route.continue();
+  });
   await page.goto("/settings");
   await page.getByRole("button", { name: "Check live discovery" }).click();
   await expect(page.locator(".toast.error")).toContainText(/Qloo|key|mapping/i);

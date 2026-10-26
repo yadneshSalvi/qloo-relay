@@ -26,7 +26,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${geist.variable} ${fraunces.variable}`}>
+    <html lang="en" data-scroll-behavior="smooth" className={`${geist.variable} ${fraunces.variable}`}>
       <body>
         <a className="skip-link" href="#main-content">Skip to content</a>
         <RelayProvider><AppShell>{children}</AppShell></RelayProvider>

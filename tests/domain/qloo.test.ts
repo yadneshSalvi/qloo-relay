@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createQlooTools } from "@qloo/qloo-harness";
 import { CATALOG, SEED_ITEMS } from "../../src/domain/catalog";
 import type { Item, Work } from "../../src/domain/types";
 import { parseOfficialExecOutput, prepareRank, rankVerifiedInventory, requireQlooConfiguration } from "../../src/server/qloo";
@@ -11,6 +12,15 @@ const env = { QLOO_API_KEY: "unit-test-not-a-real-key" };
 const result = (ids: string[]) => ({ schema_version: "1.0-preview.1", operation: "rank", status: "ok", results: ids.map(entity_id => ({ entity_id, type: "urn:entity:book", affinity: .7 })) });
 
 describe("official Qloo integration boundary", () => {
+  it("conforms to the installed official harness input schema, including canonical type aliases", () => {
+    const tools = createQlooTools({ executor: { transport: { kind: "direct", name: "offline-contract-test" }, execute: async () => { throw new Error("Contract inspection must never make a request."); } } });
+    const schema = tools.find(entry => entry.name === "qloo_rank")!.parameters as { properties: { option_type: { enum: string[] }; options: { maxItems: number }; signals: { maxItems: number } } };
+    const prepared = prepareRank(scope());
+    expect(schema.properties.option_type.enum).toContain(prepared.request.option_type);
+    expect(schema.properties.option_type.enum).not.toContain("urn:entity:book");
+    expect(prepared.request.options.length).toBeLessThanOrEqual(schema.properties.options.maxItems);
+    expect(prepared.request.signals.length).toBeLessThanOrEqual(schema.properties.signals.maxItems);
+  });
   it("rejects authored IDs, missing keys and untrusted endpoint configuration before transport", async () => {
     const source = scope(); source.works[0].mappingStatus = "authored";
     expect(() => prepareRank(source)).toThrow(expect.objectContaining({ code: "VERIFIED_MAPPING_REQUIRED" }));
@@ -41,6 +51,23 @@ describe("official Qloo integration boundary", () => {
     expect(ranked.rankings.map(row => row.entityId)).toEqual([id(2), id(1)]);
     expect(ranked.rankings[1].itemIds).toEqual(["copy-1", "copy-13"]);
     expect(ranked.source).toBe("live-qloo"); // Injected transport exercises parsing, never a live test claim.
+  });
+  it("validates official generic entity rows through subtype and normalizes uppercase UUIDs", async () => {
+    const source = scope();
+    const response = { ...result([]), interpretation: { option_type: "urn:entity:book" }, results: [{ entity_id: id(2).toUpperCase(), type: "urn:entity", subtype: "urn:entity:book", affinity: .6 }] };
+    const ranked = await rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => response });
+    expect(ranked.rankings[0].entityId).toBe(id(2));
+    for (const invalid of [
+      { ...response, results: [{ ...response.results[0], subtype: undefined }] },
+      { ...response, results: [{ ...response.results[0], subtype: "urn:entity:videogame" }] },
+      { ...response, interpretation: { option_type: "urn:entity:artist" } },
+    ]) await expect(rankVerifiedInventory(prepareRank(source), source, { env, transport: async () => invalid })).rejects.toMatchObject({ code: "QLOO_RESPONSE_INVALID" });
+  });
+  it("excludes unresolved copies while retaining exact verified mapping coverage", () => {
+    const source = scope(); source.works[2].mappingStatus = "unresolved";
+    const prepared = prepareRank(source);
+    expect(prepared.copies.some(copy => copy.workId === "work-3")).toBe(false);
+    expect(prepared.coverage).toEqual({ availableCopies: 12, mappedCopies: 11, excludedUnmappedCopies: 1 });
   });
   it("rejects unsolicited, duplicate, wrong-category and oversized responses", async () => {
     const source = scope();

@@ -1,6 +1,8 @@
+import type { AgentRun } from "./runtime";
+
 /** Public, serializable contracts. All people and inventory in sample mode are fictional. */
 export type Category = "book" | "record" | "game";
-export type DataOrigin = "authored-sample" | "live-qloo";
+export type DataOrigin = "authored-sample" | "live-qloo" | "participant-recorded";
 export type ItemCondition = "like-new" | "good" | "fair";
 export type ItemState = "available" | "reserved" | "at_hub" | "exchanged" | "withdrawn" | "disputed";
 export type ProposalStatus = "proposed" | "reserved" | "handoff_ready" | "completed" | "withdrawn" | "expired" | "invalidated" | "disputed";
@@ -17,6 +19,8 @@ export interface Work {
   colors: { background: string; foreground: string; accent: string };
   mappingStatus: "authored" | "unresolved" | "verified";
   qlooEntityId: string | null;
+  /** Cultural references such as artists cannot be listed as a physical album without a separate title confirmation. */
+  referenceOnly?: boolean;
   dataOrigin: DataOrigin;
 }
 
@@ -28,7 +32,8 @@ export interface Member {
   color: string;
   role: "member" | "coordinator";
   isYou: boolean;
-  dataOrigin: "authored-sample";
+  dataOrigin: "authored-sample" | "participant-recorded";
+  active?: boolean;
 }
 
 export interface Item {
@@ -43,7 +48,7 @@ export interface Item {
   state: ItemState;
   heldByProposalId: string | null;
   createdAt: string;
-  dataOrigin: "authored-sample";
+  dataOrigin: "authored-sample" | "participant-recorded";
 }
 
 export interface Preferences {
@@ -116,7 +121,7 @@ export interface Proposal {
   disputeKind: "condition" | "custody" | null;
   repairOf: string | null;
   receipts: HandoffReceipt[];
-  dataOrigin: "authored-sample";
+  dataOrigin: "authored-sample" | "participant-recorded";
 }
 
 export interface DiscoverySuggestion {
@@ -125,7 +130,7 @@ export interface DiscoverySuggestion {
   reason: string;
   signals: string[];
   evidenceId: string;
-  source: "authored-sample" | "live-qloo";
+  source: DataOrigin;
 }
 
 export interface DiscoveryRun {
@@ -144,7 +149,7 @@ export interface DiscoveryRun {
 export interface Evidence {
   id: string;
   kind: "session" | "preferences" | "discovery" | "approval" | "solver" | "confirmation" | "reservation" | "receipt" | "release" | "withdrawal" | "repair" | "inventory";
-  source: "authored-sample" | "live-qloo";
+  source: DataOrigin;
   title: string;
   summary: string;
   details: Record<string, unknown>;
@@ -170,20 +175,26 @@ export interface WorkspaceStats {
   completedMembers: number;
   confirmedMembers: number;
   /** These counters describe this fictional session, never a real-world pilot. */
-  dataOrigin: "authored-sample";
+  dataOrigin: "authored-sample" | "participant-recorded";
 }
 
 export interface Workspace {
   session: {
     id: string;
     displayName: string;
-    mode: "sample";
-    dataOrigin: "authored-sample";
-    canRolePlay: true;
+    mode: "sample" | "private";
+    dataOrigin: "authored-sample" | "participant-recorded";
+    canRolePlay: boolean;
     createdAt: string;
     expiresAt: string;
   };
   currentMemberId: string;
+  access: {
+    role: "member" | "coordinator";
+    authentication: "sample-role-play" | "invite-session";
+    canCoordinate: boolean;
+    expiresAt: string;
+  };
   members: Member[];
   works: Work[];
   items: Item[];
@@ -194,13 +205,15 @@ export interface Workspace {
   dismissals: { itemId: string; reason: string; createdAt: string }[];
   proposals: Proposal[];
   discovery: DiscoveryRun | null;
+  agentRuns: AgentRun[];
   evidence: Evidence[];
   events: DomainEvent[];
   stats: WorkspaceStats;
   capabilities: {
-    discovery: "authored-sample";
-    liveQloo: "unconfigured" | "mapping-required";
-    rolePlay: true;
+    discovery: "authored-sample" | "live-qloo";
+    liveQloo: "unconfigured" | "mapping-required" | "ready";
+    agent: "unconfigured" | "ready";
+    rolePlay: boolean;
     outboundMessaging: false;
   };
 }
@@ -210,6 +223,8 @@ export type Command =
   | { type: "reset"; displayName?: string }
   | { type: "preferences"; seedWorkIds: string[]; novelty: number }
   | { type: "discover"; category?: Category; mode?: "sample" | "live" }
+  | { type: "cancelRun"; runId: string }
+  | { type: "retryRun"; runId: string }
   | { type: "saveItem"; itemId: string }
   | { type: "dismiss"; itemId: string; reason: string }
   | { type: "addItem"; workId: string; edition: string; condition: ItemCondition; notes: string; attested: boolean }

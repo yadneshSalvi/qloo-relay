@@ -2,14 +2,28 @@ import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { DomainError } from "../domain/errors";
 import type { ApiError } from "../domain/types";
-import { SESSION_COOKIE, SESSION_LIFETIME_SECONDS } from "./service";
+import { ACCESS_COOKIE, SESSION_COOKIE, SESSION_LIFETIME_SECONDS } from "./service";
 
 export function json<T>(data: T, status = 200): NextResponse<T> {
   return NextResponse.json(data, { status, headers: { "Cache-Control": "private, no-store, max-age=0", "X-Content-Type-Options": "nosniff" } });
 }
 
 export function attachSession(response: NextResponse, request: NextRequest, token: string) {
-  response.cookies.set(SESSION_COOKIE, token, { httpOnly: true, sameSite: "lax", secure: new URL(request.url).protocol === "https:", path: "/", maxAge: SESSION_LIFETIME_SECONDS });
+  response.cookies.set(SESSION_COOKIE, token, { httpOnly: true, sameSite: "lax", secure: secureRequest(request), path: "/", maxAge: SESSION_LIFETIME_SECONDS });
+  return response;
+}
+
+function secureRequest(request: NextRequest) { return new URL(request.url).protocol === "https:" || (process.env.APP_ORIGIN ? new URL(process.env.APP_ORIGIN).protocol === "https:" : false); }
+
+export function sessionToken(request: NextRequest) { return request.cookies.get(ACCESS_COOKIE)?.value ?? request.cookies.get(SESSION_COOKIE)?.value; }
+
+export function attachPrivateSession(response: NextResponse, request: NextRequest, token: string) {
+  response.cookies.set(ACCESS_COOKIE, token, { httpOnly: true, sameSite: "lax", secure: secureRequest(request), path: "/", maxAge: SESSION_LIFETIME_SECONDS });
+  return response;
+}
+
+export function clearPrivateSession(response: NextResponse, request: NextRequest) {
+  response.cookies.set(ACCESS_COOKIE, "", { httpOnly: true, sameSite: "lax", secure: secureRequest(request), path: "/", maxAge: 0 });
   return response;
 }
 
@@ -20,7 +34,7 @@ export function assertSameOrigin(request: NextRequest) {
   const allowedOrigins = new Set([new URL(request.url).origin]);
   if (process.env.APP_ORIGIN) allowedOrigins.add(new URL(process.env.APP_ORIGIN).origin);
   if (!origin || request.headers.get("sec-fetch-site") === "cross-site" || !allowedOrigins.has(origin)) {
-    throw new DomainError("CROSS_SITE_REQUEST", "Open RELAY directly to make a sample exchange action.", 403);
+    throw new DomainError("CROSS_SITE_REQUEST", "Open RELAY directly to make an exchange action.", 403);
   }
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     throw new DomainError("JSON_REQUIRED", "Exchange commands must use application/json.", 415);

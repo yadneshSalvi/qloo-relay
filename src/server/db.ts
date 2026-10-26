@@ -6,9 +6,11 @@ const shared = globalThis as typeof globalThis & { relayPool?: Pool };
 export function getPool(): Pool {
   if (!process.env.DATABASE_URL) throw new DomainError("DATABASE_UNCONFIGURED", "PostgreSQL is not configured. Set DATABASE_URL and run the migration.", 503);
   if (!shared.relayPool) {
+    const max = Number(process.env.RELAY_DB_POOL_MAX ?? 10);
+    if (!Number.isInteger(max) || max < 1 || max > 10) throw new DomainError("DATABASE_CONFIGURATION", "RELAY_DB_POOL_MAX must be an integer from 1 to 10.", 503);
     shared.relayPool = new pg.Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 10,
+      max,
       connectionTimeoutMillis: 5000,
       idleTimeoutMillis: 30000,
       application_name: "relay-exchange",

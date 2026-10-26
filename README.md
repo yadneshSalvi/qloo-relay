@@ -1,14 +1,16 @@
 # RELAY
 
-Discover new wants. Make exchanges happen.
+**Discover new wants. Make exchanges happen.**
 
-RELAY is a working local exchange app for books, records, and physical games. It takes an exact “I would give this copy for that copy,” finds a compatible exchange of two to five people, collects everyone's confirmation, and records an inspected handoff at one neighborhood desk.
+[Open the deployed RELAY app](https://relay-web-nm4t32wiiq-uc.a.run.app) · [Release verification](docs/RELEASE-VERIFICATION.md) · [Submission overview](docs/SUBMISSION.md)
 
-The current experience is an **explicitly authored sample community**, with real PostgreSQL persistence and isolated browser sessions. Taste suggestions, fictional members, and their prewritten approvals are not Qloo responses. No live Qloo result, AI model run, real-world exchange, deployment, or measured product impact is claimed.
+RELAY helps a small community exchange books, records, and physical games. Qloo discovers cultural connections inside offered inventory. A bounded OpenAI agent checks useful categories and possible exchange paths. People approve exact copies; a deterministic solver connects two to five members; each participant confirms separately; a coordinator inspects the complete set before recording its release.
+
+The **sample neighborhood** contains fictional people, copies, and authored starting approvals. A **private community** starts empty, with individual invitations and separate participant/coordinator permissions. Live evidence can accompany either mode without changing the provenance of its inventory. Neither a model run nor a recorded sample handoff establishes a real participant outcome.
 
 ## Run locally
 
-Use Node **22.22.3** (`.nvmrc`; supported minimum 22.19.0), pnpm 10.15.0, and PostgreSQL 17. A Qloo key is not needed for the sample experience.
+Use Node **22.22.3** (`.nvmrc`; minimum 22.19.0), pnpm 10.15.0, and PostgreSQL 17. The sample exchange needs no provider credentials.
 
 ```sh
 nvm use
@@ -20,76 +22,108 @@ pnpm db:migrate
 pnpm dev
 ```
 
-Open [http://127.0.0.1:3101](http://127.0.0.1:3101). Both the app and the compose database bind only to loopback. PostgreSQL uses `127.0.0.1:55432` and a named data volume. The example password is for local development only. If a dedicated database already exists, skip Docker and set `DATABASE_URL` instead. Do not migrate an unrelated database.
+Open [http://127.0.0.1:3101](http://127.0.0.1:3101). The app and Compose database bind to loopback. PostgreSQL uses port 55432 and a persistent named volume. The example password is for local development only. With an existing dedicated database, skip Docker and set `DATABASE_URL`; never migrate an unrelated database.
 
-`APP_ORIGIN` must match the browser's public origin, including its port. It allows the explicitly configured origin when Next.js or a proxy normalizes the internal host. JSON mutations still require an allowed `Origin`, reject `Sec-Fetch-Site: cross-site`, and require an idempotency key.
+`APP_ORIGIN` must match the browser origin, including its port. Mutations require same-origin JSON and an idempotency key. Refreshing or restarting Node preserves the workspace. **Start a fresh sample** creates another isolated fictional community. Access expires after seven days.
 
-The migration creates the `relay` schema and shared cultural catalog. Each new browser cookie creates its own fictional members, copies, approvals, and events. Refreshing or restarting Node preserves state. **Your workspace → Start a fresh sample** creates a new community without erasing another browser's state. The cookie expires after seven days.
+## Live discovery and catalog search
 
-## Try the complete exchange
+Set `QLOO_API_KEY` and `OPENAI_API_KEY` in the worker environment, with the official endpoint settings in `.env.example`. Start a second terminal:
 
-1. On **Discover**, choose **Find your next favorite**. Explore categories, save a copy, or inspect its edition and condition. Saving never approves a trade.
-2. Open **Hades**, select your **The Creative Act**, review the exact give/get and hub terms, check the consent box, and choose **I'd make this trade**.
-3. A three-person circle links you, Maya, and Noah. Confirm your part, then open **Try a member's view** and explicitly confirm as Maya and Noah. These controls role-play fictional people; they are not real authentication.
-4. After the last confirmation, all three copies become reserved in one transaction. Open **Your handoff details**, then **Open Jo's sample desk**.
-5. Inspect and accept each copy separately. Only after all three pass can you acknowledge the complete set and **Record handoff completion**. Results and evidence reflect those recorded sample actions.
+```sh
+pnpm worker
+```
 
-For a repair, withdraw as Maya **before hub receipt**, then choose **Find another way**. A new two-person proposal needs fresh confirmations. For a condition problem, report a mismatch; release freezes until a successful explicit reinspection. Withdrawal or expiry after physical receipt creates a custody dispute and leaves the allocation frozen for manual review.
+The local worker reads this project's optional `.env.local`; it never reads a parent project's credentials. The direct OpenAI Responses provider defaults to `gpt-6.1-sol`, configurable through `OPENAI_MODEL`. Secrets never enter browser code, model prompts, command arguments, or returned evidence.
 
-## What works
+On **Your taste**, choose **Find another favorite**. On **Your shelf → Add a copy**, choose **Find another title or artist**. Search explicitly for a book, game, or artist, inspect up to five identities, and confirm the one you recognize. Confirmation adds an identity to your private catalog; saving favorites and listing an attested physical copy remain separate actions. Available ISBN identifiers describe the catalog record, not a verified physical edition. An artist favorite cannot be listed as an album: record inventory requires a separately supplied album title, pressing, condition, and ownership attestation.
 
-- Responsive discovery and global keyboard search; categories, condition filters, saved items, dismissals, and meaningful empty states.
-- Eighteen cultural works separated from sixteen initial physical copies. Your shelf supports adding copies, ownership attestation, versioned edition/condition edits, and withdrawal.
-- Versioned taste preferences with one to five favorites and a curiosity control. Sample suggestions use authored tags and preference weights with visible provenance.
-- Exact approvals tied to both item versions and hub terms, valid for 48 hours. Proposed/reserved exchanges have a separate two-hour window.
-- Deterministic enumeration of two- to five-person cycles and exact member- and item-disjoint selection. Selection first maximizes participating members, then prefers explicit lower-ranked choices and simpler handoffs. Search budgets fail honestly instead of returning a partial “optimal” result.
-- All-party confirmation; PostgreSQL locks, constraints, and unique active reservations; idempotent commands and safe replay. Changed versions, expired consent, and conflicts are rejected.
-- Coordinator inspection, condition disputes/reinspection, atomic completion, withdrawal, fresh repair, ordered events, inspectable/exportable provenance, and sample outcome counts.
-- Keyboard-operable Radix dialogs, trapped mobile navigation, reduced-motion support, and automated contrast/accessibility coverage.
+**Explore with live Qloo + AI** starts a durable discovery run. The UI shows stages, checked categories, source evidence, reserved provider requests, reported model tokens, and any unreported usage. A focused category action is also available. Cancel stops publication; retry uses saved evidence where valid. Uncertain provider attempts remain counted.
 
-## Architecture and API
+Live ranking requires verified identities for selected favorites and eligible offered copies. The repository's starter works deliberately contain **no Qloo response data or verified IDs**. An operator can independently resolve/review those identities, keep the result outside Git, and run:
 
-Next.js 16 App Router, React 19, TypeScript, PostgreSQL, Zod, Radix, and custom CSS. Fonts are local; the sample flow makes no external service call.
+```sh
+pnpm catalog:import /absolute/private/path/reviewed-mappings.json
+```
 
-| Boundary | Responsibility |
+The importer validates categories; its schema is in [scripts/import-mappings.ts](scripts/import-mappings.ts). Alternatively, use participant-confirmed search and list those works in a private community. Missing credentials, mappings, responses, or budget produce visible failures; authored suggestions never substitute for live evidence.
+
+## Try an exchange
+
+For the authored sample, choose **Find your next favorite**, open **Hades**, and approve giving your **The Creative Act** for that exact game copy. Seeded approvals permit a three-person circle with Maya and Noah. Confirm your own part, then explicitly role-play the other sample members. These controls appear only in sample mode. Inspect every copy at **Jo's sample desk**, then record completion.
+
+For independent access, open **Your community**, create a private event, and issue each participant a single-use invitation. Open them in separate browsers/profiles. Each member chooses favorites, lists owned copies, and approves only their own exact give/get terms. The coordinator organizes and inspects exchanges but cannot impersonate participant consent. Invitation/access tokens are hashed at rest; names and ownership remain self-reported.
+
+The final confirmation reserves every copy atomically. Changed editions, conditions, copy versions, terms, expired approvals, or competing reservations invalidate stale actions. Withdrawal before receipt releases reservations and can lead to a repaired proposal requiring fresh confirmations. A condition mismatch blocks release until reinspection. Withdrawal or membership revocation after receipt freezes the entire allocation for manual custody review.
+
+## Decision boundaries
+
+| Decision | Authority |
 | --- | --- |
-| `src/components` | Product UI and shared workspace state |
-| `src/domain` | Contracts, catalog, command validation, consent windows, deterministic solver |
-| `src/server/service.ts` | Session-scoped transactional commands and lifecycle rules |
-| `src/server/schema.ts` | Schema, foreign keys, reservation constraints |
-| `src/server/qloo.ts` | Guarded official-harness integration boundary |
-| `tests` | Domain, actual PostgreSQL, API, browser, accessibility verification |
+| Cultural identity | Qloo result, explicitly confirmed by a participant or reviewed operator |
+| Cultural affinity | Qloo ranking within the requested category and candidate set |
+| Which categories/copies to inspect | Bounded OpenAI tool agent |
+| Possible exchange path | Deterministic counterfactual calculation; no approval inserted |
+| Exact give/get approval and final confirmation | Scoped participant session |
+| Disjoint allocation and reservation | Deterministic solver and PostgreSQL transaction/constraints |
+| Inspection and recorded release | Scoped coordinator plus all-copy settlement rules |
 
-- `GET /api/workspace` creates/loads the cookie's private workspace.
-- `POST /api/command` accepts the command contract in `src/domain/commands.ts` with `Idempotency-Key` and same-origin JSON headers. Same key/payload replays safely; a different payload using that key is rejected.
-- `GET /api/events?after=0` returns ordered events and a continuation sequence. This is JSON pagination, not server-sent events.
-- `GET /api/health` checks database connectivity.
+The solver enumerates two- to five-person cycles and selects an exact member- and item-disjoint set. It first maximizes participating members, then prefers lower-ranked explicit choices and simpler handoffs. Exhausting its search budget returns an honest error, never a partial claim of optimality.
 
-Every mutation locks its community session row. Active reservation uniqueness independently protects copies and members. An append-only event log and transactional outbox accompany successful changes. The browser refreshes authoritative state on focus and after an uncertain command, retaining the idempotency key for an exact retry. There is no background message-delivery worker.
+Qloo affinity is not an acceptance probability, ownership proof, availability check, consent, or measured impact. Ranks remain within their category/query. Record evidence is artist-level. Display explanations come from verified IDs and current copies; catalog-theme interpretation is labeled separately. The agent has no approval, confirmation, reservation, messaging, inspection, or settlement tool.
 
-## Qloo boundary and limitations
+## Architecture and limits
 
-**Check live discovery** fails explicitly when the key is missing or the catalog lacks verified identities. It preserves sample state and never substitutes authored suggestions into a live result. Supplying a key alone does not enable live discovery.
+Next.js 16 App Router, React 19, TypeScript, PostgreSQL, Zod, Radix, custom CSS, the official Qloo harness, and Vercel AI SDK with direct OpenAI Responses. Fonts are local. The sample flow makes no provider request.
 
-The prepared server adapter uses pinned official `@qloo/qloo-harness` 0.1.26 `qloo exec rank`. It requires verified UUID mappings, separates categories, deduplicates entities, and shortlists at most ten candidates with recorded coverage. Evidence binds to community/member scope, preference version, signal IDs, and copy versions. It rejects unsolicited, duplicate, or wrong-category results and fans ranked entities back to exact eligible copies. Record discovery maps to a verified **artist** identity, not a pressing-level similarity claim. The child process has a 15-second deadline, bounded output, no shell, and no silent retry or transport/sample fallback. Keys remain in its environment, never command arguments or returned evidence.
+| Code | Responsibility |
+| --- | --- |
+| `src/components`, `src/domain` | Accessible UI, contracts, validation, consent windows, deterministic solver |
+| `src/server/service.ts`, `membership.ts` | Transactional lifecycle and individual guest/coordinator access |
+| `src/server/catalog-search.ts`, `catalog-qloo.ts` | Durable lookup and explicit identity disambiguation |
+| `src/server/jobs.ts`, `agent.ts` | Fenced discovery, budgets, checkpoints, grounded tool agent |
+| `src/server/qloo.ts` | Verified candidate boundary and low-level Insights transport |
+| `src/server/worker.ts`, `dispatch.ts` | Persistent local processing or authenticated cloud dispatch |
 
-Set `QLOO_API_KEY` server-side when available. The event gateway requires matching `QLOO_BASE_URL` and `QLOO_TRUSTED_BASE_URL` as in `.env.example`. The adapter preserves `ok`, `empty`, `needs_input`, `partial`, `degraded`, and `error`, including structured failures from nonzero CLI exits; private recovery prose is suppressed. Adapter tests inject responses. **No authenticated Qloo call has been tested.** The live adapter is not connected to user discovery yet: verified identity resolution, ambiguity confirmation, durable external-call jobs, and a final inventory recheck after the external response remain required. There is no enabled LLM agent or invented model identifier.
+Pinned `@qloo/qloo-harness` 0.1.26 uses `api search --query` for lookup and `api insights` for verified IDs, avoiding the high-level workflow's per-ID hydration calls. A fetch guard permits exactly one upstream GET on the approved endpoint, disables redirects and automatic retry fetches, and imposes a deadline. No shell is involved. Unknown IDs, duplicate entities, and wrong categories are rejected.
 
-This is a local sample product, not an open public marketplace. Real member authentication, membership permissions, messaging, photos/scanning, real coordinator accounts, custody-dispute resolution, scheduled expiry/cleanup, notifications, a real-world pilot, and production rate limiting are not implemented. Expiry reconciles on workspace reads/commands; no scheduler runs. Expired sessions remain stored until an operator applies a retention policy. Workspace evidence shows the latest 100 records/events; the event endpoint supports pagination. Shelf additions use the curated catalog. User consent and deterministic constraints remain authoritative regardless of a future model.
+Provider attempts are precharged under a PostgreSQL advisory lock. A discovery permits at most 3 Qloo requests, 8 model steps, 14 tool calls, 1,000 output tokens per model step, and 120 seconds. Default UTC-day limits: **12 Qloo / 100 model requests globally**, **6 Qloo / 32 model requests per community**. Catalog lookup shares that Qloo ledger and permits one upstream attempt per explicit search. Server settings can lower/raise these bounds; requests outside this app are not covered.
+
+Rank queries cache for six hours, with in-flight coalescing. Identical sample queries share cultural evidence; private communities have separate namespaces. No copy IDs or participant details enter the shared cache. Lookup results cache for 24 hours within their community. Publication rechecks membership, preference version, current eligibility, copy versions, and the worker's unexpired lease.
+
+See [runtime details](docs/ARCHITECTURE.md), [deployment](deploy/gcp/README.md), and [reproducible evaluation](docs/EVALUATION.md).
+
+## API
+
+Responses are non-cacheable. Mutation routes require same-origin JSON, a valid scoped session, strict commands, and `Idempotency-Key`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/workspace` | Create/load the sample or the browser's private actor scope |
+| `POST /api/command` | Preferences, inventory, discovery, consent, allocation, handoff, repair |
+| `GET/POST /api/membership` | Community creation, invitations, joining, revocation, browser exit |
+| `GET/POST /api/catalog` | Actor-scoped lookup status, explicit search, exact confirmation |
+| `GET /api/events?after=0` | Ordered event pagination, not SSE |
+| `GET /api/health` | Minimal database-backed readiness and live availability |
+
+`POST /work` belongs to the **private worker**. Cloud Run IAM authenticates Tasks/Scheduler invocation. Each request processes one saved catalog or discovery job; PostgreSQL fencing handles redelivery. Public responses never contain provider credentials or private deployment configuration.
 
 ## Verify
 
-With `.env.local` configured and PostgreSQL available:
+The 27 October 2026 release passed 81 domain/PostgreSQL tests and 13 local browser tests. Hosted verification passed two independent-session browser tests and 17 security checks. The structural evaluator checked 4,096 approval graphs against an independent oracle with zero disagreements across 8,192 comparisons. One observed hosted Games discovery used one Qloo HTTP request and four model steps; its dispatched worker task took about 15.1 seconds. These are integration and software-flow observations, not a real participant pilot or physical exchange. See the [dated verification record](docs/RELEASE-VERIFICATION.md) for scope and reproduction.
+
+Create the dedicated test database once:
 
 ```sh
-pnpm db:migrate
+docker compose exec -T postgres createdb -U qloo relay_test
+pnpm exec next typegen
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm build
+pnpm exec tsx scripts/evaluate.ts
 ```
 
-`pnpm test` includes actual PostgreSQL integration tests. They create isolated session records and clean them up; no in-memory substitute is used. Coverage includes a brute-force graph oracle, solver exhaustion, competing final confirmations, reservation uniqueness/rollback, approval/item withdrawal races, pool restart durability, idempotent reset, expiry, repair, inspection disputes, and Qloo boundary validation.
+`RELAY_TEST_DATABASE_URL` must name a database ending in `_test`. With only a loopback development URL, tests derive `relay_test`. Remote servers require an explicit test URL. Tests remove provider keys and use synthetic transports. Actual PostgreSQL tests cover races, uniqueness, lease fencing, restart durability, scope, idempotency, budgets, inspection, withdrawal, and repair. Installed-CLI tests replace network access and verify actual argument parsing/request construction. Synthetic tests are not live-provider evidence.
 
 Start the app separately, then run:
 
@@ -98,15 +132,20 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-If Chrome is installed, `PLAYWRIGHT_CHANNEL=chrome pnpm test:e2e` uses it. `PLAYWRIGHT_BASE_URL` can target another local instance. Seven browser tests cover completed handoff, repair, reinspection, shelf/taste persistence, honest live failures, 390px/768px layouts, keyboard search/navigation, and axe scans across principal pages and flow states. Automated accessibility checks supplement a manual audit; they do not establish complete accessibility conformance.
+`PLAYWRIGHT_CHANNEL=chrome` uses installed Chrome; `PLAYWRIGHT_BASE_URL` targets another local instance. Browser tests cover complete handoff, repair, reinspection, separate participant/coordinator sessions, catalog disambiguation, persistence, mobile/tablet layouts, keyboard navigation, and axe checks. Catalog fixtures are intercepted and explicitly synthetic. Automated accessibility checks do not establish complete conformance.
 
-## Production build
+For a local production build, stop the dev server sharing `.next`, run `pnpm build`, then `pnpm start`. Cloud builds run in an isolated container.
 
-Stop the development server on port 3101, then run `pnpm build` and `pnpm start`. Use persistent Node 22.19+ and PostgreSQL for any private hosted evaluation. Set `DATABASE_URL` and the exact HTTPS `APP_ORIGIN`, migrate before startup, and terminate TLS at the host/proxy. Secure cookies follow the request protocol; validate forwarded HTTPS configuration before hosting. The prepared CLI adapter requires Node process execution and its installed package; it is not an Edge integration. No deployment or production readiness is claimed.
+## Hosting and scope
+
+The deployable Google Cloud topology uses public Cloud Run web, a private worker, authenticated Cloud Tasks, scheduled recovery, and private-IP PostgreSQL with TLS. Provider keys are mounted only on the worker; web uses `RELAY_LIVE_DISCOVERY_ENABLED=true`. A runtime database role has application data access; a separate migration identity owns schema changes. [Deployment documentation](deploy/gcp/README.md) describes configuration and operation.
+
+This is a bounded, invite-only event app: 30 active guest sessions per community, 20 copies per participant, seven-day access. It does not verify civil identity/physical ownership, send messages, process payments, scan photos, or independently observe a handoff. Lost browser credentials have no account-recovery flow. Custody disputes require human resolution and keep affected copies frozen. Expiry reconciles on reads/commands; operators must apply a retention policy for expired communities and provider evidence.
+
+Live integration and independent-browser checks establish functionality, not a real participant pilot, recommendation acceptance uplift, physical exchange, environmental savings, or causal Qloo benefit. [Evaluation notes](docs/EVALUATION.md) separate exhaustive small-graph results from human outcomes still requiring study.
 
 ## Assets and license
 
-Jackets, vinyl illustrations, the RELAY mark, and decorative diagrams are original SVG/CSS studies, not official product covers. Work/artist names identify cultural works without implying endorsement. Descriptions and fictional biographies are authored. Geist Variable and Fraunces Variable are locally bundled from Fontsource under their SIL Open Font License distributions. Icons are Lucide (ISC). Third-party packages retain their licenses.
+Jackets, vinyl illustrations, the RELAY mark, and decorative diagrams are original SVG/CSS studies, not official covers. Cultural names identify works without implying endorsement. Starter descriptions and fictional biographies are authored. Qloo response data, reviewed mappings, participant records, and private traces stay outside the public repository.
 
-Application code: [MIT](LICENSE), copyright 2026 Yadnesh Salvi.
-
+Geist Variable and Fraunces Variable are locally bundled from Fontsource under their SIL Open Font License distributions. Icons are Lucide (ISC). Third-party packages retain their licenses. Application code: [MIT](LICENSE), copyright 2026 Yadnesh Salvi.
