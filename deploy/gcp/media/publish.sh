@@ -12,7 +12,7 @@ gc="$script_dir/../gcloud.sh"
   --substitutions="_IMAGE=$RELAY_MEDIA_IMAGE" --quiet
 "$gc" run deploy relay-demo --region="$RELAY_REGION" --image="$RELAY_MEDIA_IMAGE" \
   --service-account="relay-media@$RELAY_GCP_PROJECT.iam.gserviceaccount.com" \
-  --port=8080 --cpu=1 --memory=512Mi --cpu-throttling --execution-environment=gen2 \
+  --port=8080 --use-http2 --cpu=1 --memory=512Mi --cpu-throttling --execution-environment=gen2 \
   --min=0 --min-instances=0 --max=1 --max-instances=1 --concurrency=40 --timeout=300 \
   --no-invoker-iam-check --quiet
 "$gc" run services describe relay-demo --region="$RELAY_REGION" --format='value(status.url)'

@@ -18,8 +18,8 @@ repo = source.parents[2]
 if output == repo or repo in output.parents:
     parser.error('Keep generated media/build output outside the source repository.')
 video, poster, captions = (p.expanduser().resolve(strict=True) for p in (args.video, args.poster, args.captions))
-if not 0 < video.stat().st_size <= 30 * 1024 * 1024:
-    parser.error('The final MP4 must be nonempty and at most 30 MiB for this bounded Cloud Run demo.')
+if not 0 < video.stat().st_size <= 128 * 1024 * 1024:
+    parser.error('The final MP4 must be nonempty and at most 128 MiB for this bounded Cloud Run demo.')
 with video.open('rb') as stream:
     if stream.read(12)[4:8] != b'ftyp':
         parser.error('The selected video must be an MP4 container.')

@@ -6,8 +6,9 @@ This isolated Cloud Run service serves one approved final MP4, its poster and
 English WebVTT captions. It has no database, VPC attachment, credentials, provider
 integration, or application state. The existing RELAY web/worker services are
 not modified. Nginx supplies static byte ranges for seeking; an MP4 processing
-module is unnecessary. The page has native controls, optional native captions (the film already includes word captions),
-and links to the live app and public source.
+module is unnecessary. The page has native controls, optional English captions, and links to the live app
+and public source. The film has no burned-in captions or title bands. Versioned
+media URLs keep a cached earlier film from replacing the current release.
 
 Do not publish until a release reviewer has checked the final media and publication is authorized. Never pass
 the film project directory as a Cloud Build context. Use `prepare.py` to build a
@@ -38,8 +39,21 @@ Verify the public page, MP4 `Content-Type: video/mp4`, poster image MIME type,
 correct `Content-Range` before providing the URL to judges. Check native playback,
 seeking, caption controls and the app/source links in a fresh browser.
 
-The MP4 is limited to 30 MiB by the staging tool so full downloads stay within
-Cloud Run’s HTTP/1 response limit. The current approved film is 177 seconds and
-14,078,806 bytes. Anonymous page, video byte range (206), poster MIME, and
-caption MIME/content checks passed. Browser checks confirmed playback, seeking
-to about 90 seconds, and native caption selection.
+The staging tool limits the MP4 to 128 MiB. Nginx accepts HTTP/2 cleartext on
+port 8080, and `publish.sh` enables Cloud Run’s end-to-end HTTP/2 setting. This
+allows the larger interaction recording to download completely rather than
+relying on a non-streaming HTTP/1 response. See [Cloud Run HTTP/2 configuration](https://docs.cloud.google.com/run/docs/configuring/http2)
+and [response limits](https://docs.cloud.google.com/run/quotas).
+
+The v0.2.0 film is 207.500 seconds, 1920×1080 at 30 fps, and 81,660,839 bytes. It
+uses a continuous capture of the deployed app, retains the performed typing and
+clicks at 1×, and removes inactive time. A single slow focus emphasizes fresh
+confirmations. The fictional sample includes live Qloo discovery, exact-copy
+approval, withdrawal, new confirmations, inspections and recorded completion.
+
+Before deployment, the pinned Nginx container passed a local h2c full-file
+download/hash check, first/last byte ranges, caption/poster MIME and content
+checks, and rejection of private artifact paths. Repeat these checks on the
+public service, then check native playback, seeking and optional captions in a
+browser. The dated [release verification](../../../docs/RELEASE-VERIFICATION.md)
+records the published checks.
