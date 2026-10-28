@@ -14,8 +14,8 @@ connections, private IP only, and three daily backups. Cloud Run reaches it thro
 Direct VPC egress on `relay-private/relay-run`; no paid VPC connector is required.
 This shared CPU demo database has no high availability or Cloud SQL SLA.
 
-Web keeps one minimum instance for responsive demo visits and is capped at two;
-worker scales to zero and is capped at one,
+The deployment default lets web scale to zero and caps it at two instances;
+worker also scales to zero and is capped at one,
 with one request at a time. The discovery queue also serializes delivery. Worker
 requests have a 180 second deadline; database fencing makes redelivery safe.
 Server-side provider limits remain authoritative even when deliveries retry.
@@ -56,12 +56,31 @@ then removed from the job configuration and Secret Manager.
 
 ## Cost and operation
 
-Baseline infrastructure is the small database/storage and one warm web instance
-(roughly $20–25/month in Iowa including light backup/registry use); active Run
-processing, Tasks, builds, logs, and internet traffic add
-usage charges. This is an estimate, not a hard spending cap. Provider API billing
-is separate. Keep maximum instances and application provider budgets bounded.
+The deployment script sets both service-level and revision-level minimum instances
+to zero and retains request-based CPU billing. After idle instances are removed,
+the next visit or worker request can incur a cold start. On 28 October 2026, the live web service minimum was changed to zero without
+changing its application revision, revision specification, or traffic assignment.
+The deployment script preserves this setting for future releases.
+
+Scale-to-zero removes the configured warm-instance baseline, not all costs.
+Provisioned Cloud SQL compute, database storage, and retained backups continue
+to incur charges. Active Cloud Run requests (including recovery requests),
+Tasks, Scheduler, Secret Manager, builds, artifact/media storage, logs, and network traffic add
+usage charges; provider API billing is separate. Actual charges depend on usage,
+retention, applicable free tiers and discounts. Instance and provider limits are
+not a hard spending cap. Keep maximum instances and application provider budgets bounded.
 
 Pricing references: [Cloud SQL](https://cloud.google.com/sql/pricing),
 [Cloud Run](https://cloud.google.com/run/pricing),
 [authenticated Tasks delivery](https://docs.cloud.google.com/run/docs/triggering/using-tasks).
+
+Pricing examples checked 28 October 2026, conditional on the stated sizing rather
+than a verified live configuration or current bill: at 730 hours, a warm 1-vCPU,
+512-MiB web instance costs about US$9.86/month at idle CPU and memory rates of
+US$0.0000025 per vCPU-second and GiB-second respectively, before shared free tiers
+and discounts. Minimum zero removes that warm-instance baseline, not all charges.
+An Iowa non-HA `db-f1-micro` at US$0.0105/hour plus 10 GiB SSD at
+US$0.000232877/GiB-hour costs about US$9.37/month for compute and disk
+(`730 × 0.0105 + 10 × 730 × 0.000232877`), excluding backups, other services,
+provider usage, tax and discounts. See [Cloud Run rates](https://cloud.google.com/run/pricing)
+and [Cloud SQL rates](https://cloud.google.com/sql/pricing).
